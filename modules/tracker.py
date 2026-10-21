@@ -1,3 +1,5 @@
+from collections import deque
+import ctypes
 import time
 from typing import Union, Optional, Tuple
 import cv2
@@ -11,12 +13,21 @@ from .utils import get_screen_resolution, ensure_model_exists, set_mouse_positio
 from .visualizer import draw_visuals, draw_hud, render_screen_canvas
 
 
+def _get_cursor_pos() -> Tuple[int, int]:
+    """Lấy tọa độ con trỏ chuột hiện tại trên hệ điều hành Windows."""
+    try:
+        pt = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return int(pt.x), int(pt.y)
+    except Exception:
+        return 0, 0
+
+
 class GazeTracker:
     """
     Trình điều phối theo dõi ánh mắt và điều khiển con trỏ:
-    - Nhận diện khuôn mặt & mống mắt 3D qua MediaPipe.
-    - Hiệu chuẩn 9 điểm toàn màn hình với bộ lọc loại bỏ chớp mắt & nhiễu.
-    - Ánh xạ RidgeCV + Polynomial bậc 2 kèm bộ lọc 1€ Filter triệt tiêu rung giật.
+    - Hiệu chuẩn 13 điểm toàn màn hình.
+    - Hỗ trợ Click chuột chọn điểm trên màn hình + nhấn [Space] để bắt dính điểm bất kỳ.
     """
 
     def __init__(
@@ -33,9 +44,18 @@ class GazeTracker:
         self.mapper = GazeScreenMapper(self.screen_w, self.screen_h)
         self.last_gaze_pt: Optional[Tuple[int, int]] = None
         self.is_fullscreen = False
+        self.recent_features: deque = deque(maxlen=18)
+        self.clicked_target_pt: Optional[Tuple[int, int]] = None
+
+    def _on_screen_mouse(self, event, x, y, flags, param):
+        """Sự kiện click chuột trái lên cửa sổ Screen Gaze Mapping để đặt điểm đích cần tinh chỉnh."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.clicked_target_pt = (int(x), int(y))
+            print(f"[*] Đã chọn điểm đích ({x}, {y}) — Hãy nhìn vào điểm màu tím và nhấn [Space]!")
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            self.clicked_target_pt = None
 
     def run(self):
-        """Khởi chạy vòng lặp xử lý video."""
         print(f"[+] Độ phân giải màn hình phát hiện: {self.screen_w} x {self.screen_h}")
 
         model_path = ensure_model_exists(self.model_path)
@@ -56,10 +76,10 @@ class GazeTracker:
             print(f"[!] Lỗi: Không thể mở webcam/video nguồn: {self.source}")
             return
 
-        # Cửa sổ hiển thị mô phỏng màn hình (Screen Canvas)
         screen_win_name = "Screen Gaze Mapping"
         cv2.namedWindow(screen_win_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(screen_win_name, min(1280, self.screen_w), min(720, self.screen_h))
+        cv2.setMouseCallback(screen_win_name, self._on_screen_mouse)
 
         camera_win_name = "MediaPipe - Gaze & Eye Landmarks"
         cv2.namedWindow(camera_win_name, cv2.WINDOW_NORMAL)
@@ -88,12 +108,13 @@ class GazeTracker:
 
                 detection_result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
 
-                # Xử lý hình ảnh và lấy vector đặc trưng 12 chiều
                 annotated_frame, feat_vec, eye_info, head_info, is_blinking = draw_visuals(
                     frame, detection_result
                 )
 
-                # Tính FPS
+                if feat_vec is not None and not is_blinking:
+                    self.recent_features.append(feat_vec)
+
                 curr_time = time.time()
                 fps = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0
                 prev_time = curr_time
@@ -101,13 +122,11 @@ class GazeTracker:
                 calib_info = None
                 gaze_screen_pt = None
 
-                # Xử lý logic Hiệu chuẩn / Dự đoán
                 if self.mapper.is_calibrating:
                     calib_info, finished = self.mapper.update_calibration(
                         feat_vec, is_blinking=is_blinking
                     )
                 else:
-                    # Trạng thái theo dõi ánh mắt (Tracking)
                     if feat_vec is not None and self.mapper.model is not None:
                         if not is_blinking:
                             gaze_screen_pt = self.mapper.predict(feat_vec, timestamp=curr_time)
@@ -116,19 +135,17 @@ class GazeTracker:
                                 if move_mouse_enabled:
                                     set_mouse_position(gaze_screen_pt[0], gaze_screen_pt[1])
                         else:
-                            # Khi chớp mắt: Giữ nguyên vị trí con trỏ cuối cùng, không nhảy giật
                             gaze_screen_pt = self.last_gaze_pt
 
-                # Vẽ Canvas màn hình
                 screen_canvas = render_screen_canvas(
                     screen_w=self.screen_w,
                     screen_h=self.screen_h,
                     calib_info=calib_info,
                     gaze_screen_pt=gaze_screen_pt,
                     has_model=(self.mapper.model is not None),
+                    target_marker_pt=self.clicked_target_pt,
                 )
 
-                # Vẽ HUD lên cửa sổ Camera
                 draw_hud(
                     frame=annotated_frame,
                     eye_info=eye_info,
@@ -140,7 +157,6 @@ class GazeTracker:
                     mouse_enabled=move_mouse_enabled,
                 )
 
-                # Hiển thị cả 2 cửa sổ
                 cv2.imshow(camera_win_name, annotated_frame)
                 cv2.imshow(screen_win_name, screen_canvas)
 
@@ -148,12 +164,16 @@ class GazeTracker:
                 if key == ord("q") or key == 27:
                     break
                 elif key == ord("c") or key == ord("C"):
-                    # Tự động chuyển toàn màn hình khi hiệu chuẩn để tọa độ đạt độ chính xác 1:1
                     cv2.setWindowProperty(screen_win_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
                     self.is_fullscreen = True
+                    self.clicked_target_pt = None
                     self.mapper.start_calibration()
+                elif key == ord(" "):
+                    # Phím [Space]: Bắt dính ngay điểm đang nhìn (dựa trên điểm đã click hoặc vị trí chuột)
+                    if not self.mapper.is_calibrating and len(self.recent_features) >= 5:
+                        target_pt = self.clicked_target_pt if self.clicked_target_pt is not None else _get_cursor_pos()
+                        self.mapper.add_quick_anchor(list(self.recent_features), target_pt)
                 elif key == ord("f") or key == ord("F"):
-                    # Phím tắt chuyển đổi Toàn màn hình / Cửa sổ
                     self.is_fullscreen = not self.is_fullscreen
                     prop = cv2.WINDOW_FULLSCREEN if self.is_fullscreen else cv2.WINDOW_NORMAL
                     cv2.setWindowProperty(screen_win_name, cv2.WND_PROP_FULLSCREEN, prop)
@@ -168,6 +188,5 @@ class GazeTracker:
 
 
 def run_tracker(source: Union[int, str] = 0, control_mouse: bool = False):
-    """Hàm tiện ích chạy Gaze Tracker nhanh chóng."""
     tracker = GazeTracker(source=source, control_mouse=control_mouse)
     tracker.run()

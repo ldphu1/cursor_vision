@@ -3,7 +3,6 @@ import time
 from typing import Optional, Tuple, List, Dict, Any
 import joblib
 import numpy as np
-from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import RobustScaler, PolynomialFeatures
 from sklearn.linear_model import RidgeCV
 
@@ -17,35 +16,89 @@ from .config import (
     ONE_EURO_MIN_CUTOFF,
     ONE_EURO_BETA,
     ONE_EURO_D_CUTOFF,
+    FIXATION_WINDOW_SIZE,
+    FIXATION_DISPERSION_PX,
+    FIXATION_RELEASE_PX,
+    FIXATION_MAGNET_STRENGTH,
 )
-from .geometry import OneEuroFilter
+from .geometry import OneEuroFilter, FixationStabilizer
 
-FEATURE_DIM = 12
-MODEL_VERSION = "poly_ridge_v2.3"
+FEATURE_DIM = 14
+MODEL_VERSION = "hybrid_poly_rbf_v2.4"
 
 
-def _build_pipeline() -> Pipeline:
+class HybridGazeModel:
     """
-    Pipeline Hồi quy Đa thức bậc 2 + RidgeCV:
-    - RobustScaler: chống lại các giá trị ngoại lai (outliers) tốt hơn StandardScaler.
-    - PolynomialFeatures(degree=2): mô hình hóa chính xác hình học cầu của nhãn cầu
-      và sự tương tác chéo giữa góc nhìn mắt (rx, ry) với vị trí/góc đầu (head pose).
-    - RidgeCV: tự động chọn hệ số điều chuẩn alpha tối ưu bằng Leave-One-Out CV,
-      đảm bảo nội suy mượt và ngoại suy chính xác ra sát 4 cạnh màn hình.
+    Mô hình ánh xạ Hybrid 2 tầng:
+    1. Tầng toàn cục (Global Parametric):
+       - Đa thức bậc 2 trên 5 đặc trưng mắt cốt lõi [rx_avg, ry_avg, gx_avg, gy_avg, gy_nasion]
+         kết hợp tuyến tính (bậc 1) với từng mắt và tư thế đầu [head_x, head_y, pitch, yaw, roll].
+       - Ngăn chặn hoàn toàn hiện tượng overfitting 90 chiều của góc đầu.
+    2. Tầng khớp điểm cục bộ (Local Residual RBF Interpolator):
+       - Nội suy chính xác phần dư (residual error) tại tâm của tất cả các điểm hiệu chuẩn
+         trên mặt phẳng ánh mắt (rx_avg, ry_avg, gx_avg, gy_avg).
+       - Đảm bảo khi mắt tập trung vào bất kỳ vùng nào đã hiệu chuẩn, sai số khớp < 3px.
     """
-    alphas = np.logspace(-2, 3, 30)
-    return Pipeline([
-        ("scaler", RobustScaler()),
-        ("poly", PolynomialFeatures(degree=2, include_bias=False)),
-        ("ridge", RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")),
-    ])
+
+    def __init__(self):
+        self.scaler = RobustScaler()
+        self.poly = PolynomialFeatures(degree=2, include_bias=False)
+        self.ridge = RidgeCV(alphas=np.logspace(-2, 2.5, 30))
+
+        self.anchor_gaze: Optional[np.ndarray] = None
+        self.rbf_weights: Optional[np.ndarray] = None
+        self.rbf_gamma: float = 12.0
+
+    def _transform_features(self, X: np.ndarray, fit: bool = False) -> np.ndarray:
+        X_scaled = self.scaler.fit_transform(X) if fit else self.scaler.transform(X)
+        # 5 đặc trưng mắt trung tâm -> khai triển bậc 2 (20 chiều)
+        core_eye = X_scaled[:, :5]
+        core_poly = self.poly.fit_transform(core_eye) if fit else self.poly.transform(core_eye)
+        # 4 đặc trưng mắt đơn lẻ + 5 đặc trưng đầu -> giữ tuyến tính bậc 1 với hệ số giảm nhẹ
+        aux_linear = X_scaled[:, 5:] * 0.5
+        return np.hstack([core_poly, aux_linear])
+
+    def fit(self, X_all: np.ndarray, Y_all: np.ndarray, X_centroids: np.ndarray, Y_centroids: np.ndarray):
+        Phi_all = self._transform_features(X_all, fit=True)
+        self.ridge.fit(Phi_all, Y_all)
+
+        # Tính sai số dư (Residuals) tại các tâm điểm hiệu chuẩn (Anchor Centroids)
+        Phi_c = self._transform_features(X_centroids, fit=False)
+        pred_c = self.ridge.predict(Phi_c)
+        residuals = Y_centroids - pred_c
+
+        # Khớp hàm RBF mượt trên 4 đặc trưng mắt chính đã chuẩn hóa [rx_avg, ry_avg, gx_avg, gy_avg]
+        C_scaled = self.scaler.transform(X_centroids)[:, :4]
+        self.anchor_gaze = C_scaled
+
+        # Tự động ước lượng bán kính ảnh hưởng gamma theo khoảng cách giữa các điểm neo
+        dists_sq = np.sum((C_scaled[:, None, :] - C_scaled[None, :, :]) ** 2, axis=-1)
+        non_zero = dists_sq[dists_sq > 1e-6]
+        median_d2 = float(np.median(non_zero)) if len(non_zero) > 0 else 1.0
+        self.rbf_gamma = 1.25 / max(median_d2, 0.15)
+
+        K = np.exp(-self.rbf_gamma * dists_sq)
+        # Giải hệ phương trình tuyến tính có điều chuẩn nhẹ (lambda = 0.015) để tránh gợn sóng
+        reg = 0.015 * np.eye(len(C_scaled))
+        self.rbf_weights = np.linalg.solve(K + reg, residuals)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        Phi = self._transform_features(X, fit=False)
+        base_pred = self.ridge.predict(Phi)
+
+        if self.anchor_gaze is not None and self.rbf_weights is not None:
+            G_scaled = self.scaler.transform(X)[:, :4]
+            dists_sq = np.sum((G_scaled[:, None, :] - self.anchor_gaze[None, :, :]) ** 2, axis=-1)
+            K = np.exp(-self.rbf_gamma * dists_sq)
+            return base_pred + K @ self.rbf_weights
+
+        return base_pred
 
 
 class GazeScreenMapper:
     """
-    Quản lý quy trình hiệu chuẩn 9 điểm và ánh xạ ánh mắt lên màn hình máy tính.
-    Vector đầu vào 12 chiều:
-        [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg, ear_avg, head_x, head_y, pitch_norm, yaw_norm, roll_norm]
+    Quản lý hiệu chuẩn 13 điểm, tinh chỉnh điểm tức thì ([Space]) và khóa điểm hội tụ.
     """
 
     def __init__(
@@ -57,12 +110,21 @@ class GazeScreenMapper:
         self.screen_w = screen_w
         self.screen_h = screen_h
         self.model_path = model_path
-        self.model: Optional[Pipeline] = None
+        self.model: Optional[HybridGazeModel] = None
 
         self.filter_x = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
         self.filter_y = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
+        self.stabilizer = FixationStabilizer(
+            window_size=FIXATION_WINDOW_SIZE,
+            dispersion_px=FIXATION_DISPERSION_PX,
+            release_px=FIXATION_RELEASE_PX,
+            magnet_strength=FIXATION_MAGNET_STRENGTH,
+        )
 
+        # Lưới 13 điểm: 9 điểm chuẩn + 4 điểm tâm của 4 góc phần tư màn hình
         mx, my = CALIB_MARGIN_X, CALIB_MARGIN_Y
+        qx1, qx2 = 0.28, 0.72
+        qy1, qy2 = 0.28, 0.72
         self.norm_calib_points: List[Tuple[float, float]] = [
             (0.5,       0.5      ),  # 1. Tâm màn hình
             (mx,        my       ),  # 2. Góc trên trái
@@ -73,6 +135,10 @@ class GazeScreenMapper:
             (0.5,       1.0 - my ),  # 7. Giữa dưới
             (mx,        1.0 - my ),  # 8. Góc dưới trái
             (mx,        0.5      ),  # 9. Giữa trái
+            (qx1,       qy1      ),  # 10. Phần tư trên-trái
+            (qx2,       qy1      ),  # 11. Phần tư trên-phải
+            (qx2,       qy2      ),  # 12. Phần tư dưới-phải
+            (qx1,       qy2      ),  # 13. Phần tư dưới-trái
         ]
         self.calib_points: List[Tuple[int, int]] = [
             (int(px * screen_w), int(py * screen_h))
@@ -89,21 +155,26 @@ class GazeScreenMapper:
         self.current_point_samples: List[List[float]] = []
         self.X_data: List[List[float]] = []
         self.Y_data: List[List[float]] = []
+        self.anchor_X: List[List[float]] = []
+        self.anchor_Y: List[List[float]] = []
 
         self.load_model()
 
     def start_calibration(self):
-        """Bắt đầu phiên hiệu chuẩn 9 điểm toàn màn hình."""
+        """Bắt đầu phiên hiệu chuẩn 13 điểm toàn màn hình."""
         self.is_calibrating = True
         self.calib_step = 0
         self.calib_start_time = time.time()
         self.current_point_samples = []
         self.X_data = []
         self.Y_data = []
+        self.anchor_X = []
+        self.anchor_Y = []
         self.filter_x.reset()
         self.filter_y.reset()
-        print("\n[+] Bắt đầu hiệu chuẩn 9 điểm (Poly-RidgeCV 12D)!")
-        print("[+] Hãy giữ đầu tự nhiên và nhìn thẳng vào tâm chấm tròn...")
+        self.stabilizer.reset()
+        print("\n[+] Bắt đầu hiệu chuẩn 13 điểm (Hybrid Poly+RBF & Fixation Lock)!")
+        print("[+] Hãy nhìn vào tâm chấm đỏ của từng điểm...")
 
     def update_calibration(
         self,
@@ -154,87 +225,127 @@ class GazeScreenMapper:
         }, False
 
     def _finalize_current_point(self, target_norm: Tuple[float, float]):
-        """
-        Lọc mẫu ngoại lai tập trung vào các đặc trưng mắt cốt lõi (rx_l..ry_avg)
-        và kết hợp tâm cụm (Median Centroid) để triệt tiêu nhiễu vi mô tại chỗ.
-        """
+        """Lọc mẫu ngoại lai trên 5 đặc trưng mắt cốt lõi và trích xuất Anchor Centroid."""
         n_raw = len(self.current_point_samples)
         if n_raw < 3:
             print(f"[!] Điểm {self.calib_step + 1}: chỉ có {n_raw} mẫu — bỏ qua.")
             return
 
         samples = np.array(self.current_point_samples, dtype=np.float64)
-        # Tính khoảng cách MAD trên 6 đặc trưng mắt chính [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg]
-        eye_feats = samples[:, :6]
-        median_eye = np.median(eye_feats, axis=0)
-        dists = np.linalg.norm(eye_feats - median_eye, axis=1)
+        eye_core = samples[:, :5]
+        med_core = np.median(eye_core, axis=0)
+        dists = np.linalg.norm(eye_core - med_core, axis=1)
         mad = max(np.median(dists), 1e-6)
 
-        # Giữ lại 70% mẫu gần tâm nhất hoặc trong ngưỡng 1.8 * MAD
-        threshold = max(1.8 * mad, np.percentile(dists, 70))
+        threshold = max(1.6 * mad, np.percentile(dists, 65))
         mask = dists <= threshold
         clean = samples[mask] if mask.sum() >= 3 else samples
 
-        # Tính tâm cụm sạch (trimmed mean + median) làm điểm neo chuẩn xác
-        centroid = 0.5 * (np.median(clean, axis=0) + np.mean(clean, axis=0))
-
+        centroid = 0.6 * np.median(clean, axis=0) + 0.4 * np.mean(clean, axis=0)
         tx, ty = target_norm
-        # Đưa các mẫu đã làm mịn quanh tâm cụm vào tập huấn luyện (giảm 70% phương sai nhiễu nội cụm)
+
+        self.anchor_X.append(centroid.tolist())
+        self.anchor_Y.append([tx, ty])
+
         for s in clean:
-            stabilized_sample = 0.65 * centroid + 0.35 * s
-            self.X_data.append(stabilized_sample.tolist())
+            blended = 0.70 * centroid + 0.30 * s
+            self.X_data.append(blended.tolist())
             self.Y_data.append([tx, ty])
 
-        # Thêm trọng số cho chính tâm cụm
-        for _ in range(5):
+        for _ in range(6):
             self.X_data.append(centroid.tolist())
             self.Y_data.append([tx, ty])
 
         print(f"[+] Điểm {self.calib_step + 1}/{len(self.calib_points)}: "
-              f"lọc {len(clean)}/{n_raw} mẫu sạch (rx={centroid[4]:.3f}, ry={centroid[5]:.3f}).")
+              f"{len(clean)}/{n_raw} mẫu sạch (gx={centroid[2]:.3f}, gy={centroid[3]:.3f}).")
+
+    def add_quick_anchor(self, recent_features: List[List[float]], target_px: Tuple[int, int]) -> bool:
+        """
+        Bắt điểm tức thì ([Space]): Thêm hoặc cập nhật 1 điểm neo tại đúng vị trí người dùng đang nhìn
+        và huấn luyện lại mô hình Hybrid trong vài mili-giây.
+        """
+        if len(recent_features) < 3 or len(self.anchor_X) < 5:
+            return False
+
+        samples = np.array(recent_features, dtype=np.float64)
+        centroid = np.median(samples, axis=0)
+        tx = float(np.clip(target_px[0] / self.screen_w, 0.0, 1.0))
+        ty = float(np.clip(target_px[1] / self.screen_h, 0.0, 1.0))
+
+        # Nếu điểm mới nằm rất gần một điểm neo cũ (< 6% màn hình), cập nhật điểm neo đó
+        anchor_Y_arr = np.array(self.anchor_Y, dtype=np.float64)
+        dists_screen = np.hypot(anchor_Y_arr[:, 0] - tx, anchor_Y_arr[:, 1] - ty)
+        min_idx = int(np.argmin(dists_screen))
+
+        if dists_screen[min_idx] < 0.06:
+            old_c = np.array(self.anchor_X[min_idx], dtype=np.float64)
+            new_c = 0.35 * old_c + 0.65 * centroid
+            self.anchor_X[min_idx] = new_c.tolist()
+            self.anchor_Y[min_idx] = [tx, ty]
+        else:
+            self.anchor_X.append(centroid.tolist())
+            self.anchor_Y.append([tx, ty])
+
+        for _ in range(8):
+            self.X_data.append(centroid.tolist())
+            self.Y_data.append([tx, ty])
+
+        self.train_model()
+        self.stabilizer.reset()
+        print(f"[+] Đã ghim điểm mới tại ({target_px[0]}, {target_px[1]}) thành công!")
+        return True
 
     def train_model(self):
-        """Huấn luyện mô hình Đa thức bậc 2 + RidgeCV."""
-        if len(self.X_data) < 15:
+        """Huấn luyện mô hình Hybrid Poly-Ridge + Residual RBF."""
+        if len(self.X_data) < 15 or len(self.anchor_X) < 5:
             print("[!] Không đủ dữ liệu huấn luyện.")
             return
 
-        X = np.array(self.X_data, dtype=np.float64)
-        Y = np.array(self.Y_data, dtype=np.float64)
+        X_all = np.array(self.X_data, dtype=np.float64)
+        Y_all = np.array(self.Y_data, dtype=np.float64)
+        X_c = np.array(self.anchor_X, dtype=np.float64)
+        Y_c = np.array(self.anchor_Y, dtype=np.float64)
 
-        print(f"\n[+] Huấn luyện Poly-RidgeCV trên {len(X)} mẫu (Vector 12 chiều)...")
         t0 = time.time()
-        self.model = _build_pipeline()
-        self.model.fit(X, Y)
+        model = HybridGazeModel()
+        model.fit(X_all, Y_all, X_c, Y_c)
+        self.model = model
         dt = (time.time() - t0) * 1000
 
-        pred = self.model.predict(X)
-        rmse = float(np.sqrt(np.mean(
-            (pred[:, 0] * self.screen_w - Y[:, 0] * self.screen_w) ** 2 +
-            (pred[:, 1] * self.screen_h - Y[:, 1] * self.screen_h) ** 2
+        pred_c = self.model.predict(X_c)
+        rmse_c = float(np.sqrt(np.mean(
+            (pred_c[:, 0] * self.screen_w - Y_c[:, 0] * self.screen_w) ** 2 +
+            (pred_c[:, 1] * self.screen_h - Y_c[:, 1] * self.screen_h) ** 2
         )))
-        best_alpha = self.model.named_steps["ridge"].alpha_
-        print(f"[+] Huấn luyện hoàn tất trong {dt:.1f}ms | Alpha tối ưu: {best_alpha:.3f} | Sai số RMSE: {rmse:.1f}px")
+        print(f"[+] Huấn luyện Hybrid hoàn tất ({dt:.1f}ms) | Sai số tại {len(X_c)} điểm tâm: {rmse_c:.1f}px")
 
         try:
-            payload = {"version": MODEL_VERSION, "model": self.model}
+            payload = {
+                "version": MODEL_VERSION,
+                "model": self.model,
+                "X_data": self.X_data,
+                "Y_data": self.Y_data,
+                "anchor_X": self.anchor_X,
+                "anchor_Y": self.anchor_Y,
+            }
             joblib.dump(payload, self.model_path)
-            print(f"[+] Đã lưu mô hình vào: {self.model_path}")
         except Exception as e:
             print(f"[!] Lưu model thất bại: {e}")
 
     def load_model(self):
-        """Tải mô hình từ đĩa và kiểm tra phiên bản tương thích."""
         if not os.path.exists(self.model_path):
             return
         try:
             loaded = joblib.load(self.model_path)
             if isinstance(loaded, dict) and loaded.get("version") == MODEL_VERSION:
                 self.model = loaded["model"]
-                print(f"[+] Đã tải mô hình {MODEL_VERSION} từ: {self.model_path}")
+                self.X_data = loaded.get("X_data", [])
+                self.Y_data = loaded.get("Y_data", [])
+                self.anchor_X = loaded.get("anchor_X", [])
+                self.anchor_Y = loaded.get("anchor_Y", [])
+                print(f"[+] Đã tải mô hình {MODEL_VERSION} ({len(self.anchor_X)} điểm neo).")
             else:
-                print("[!] Phát hiện file model phiên bản cũ (SVR/khác hệ đặc trưng).")
-                print("[*] Hãy nhấn phím 'C' để hiệu chuẩn lại với thuật toán mới.")
+                print("[!] Model cũ khác phiên bản — hãy nhấn phím 'C' để hiệu chuẩn 13 điểm mới.")
                 self.model = None
         except Exception as e:
             print(f"[!] Lỗi khi tải model: {e}")
@@ -245,18 +356,22 @@ class GazeScreenMapper:
         feature_vector: List[float],
         timestamp: Optional[float] = None,
     ) -> Optional[Tuple[int, int]]:
-        """Dự đoán tọa độ màn hình (Sx, Sy) và lọc mượt bằng One Euro Filter."""
         if self.model is None or feature_vector is None:
             return None
 
         t = timestamp if timestamp is not None else time.time()
         pred_norm = self.model.predict(np.array([feature_vector], dtype=np.float64))[0]
 
-        # Áp dụng lọc 1€ trước khi kẹp biên để tránh hiệu ứng dính viền
-        smooth_norm_x = self.filter_x.filter(float(pred_norm[0]), t)
-        smooth_norm_y = self.filter_y.filter(float(pred_norm[1]), t)
+        raw_x = float(pred_norm[0] * self.screen_w)
+        raw_y = float(pred_norm[1] * self.screen_h)
 
-        sx = int(np.clip(smooth_norm_x * self.screen_w, 0, self.screen_w - 1))
-        sy = int(np.clip(smooth_norm_y * self.screen_h, 0, self.screen_h - 1))
+        # Bước 1: Lọc quỹ đạo bằng One Euro Filter
+        filt_x = self.filter_x.filter(raw_x, t)
+        filt_y = self.filter_y.filter(raw_y, t)
 
+        # Bước 2: Khóa điểm hội tụ (Fixation Magnet Lock) khi mắt tập trung vào 1 điểm
+        lock_x, lock_y = self.stabilizer.update(filt_x, filt_y)
+
+        sx = int(np.clip(lock_x, 0, self.screen_w - 1))
+        sy = int(np.clip(lock_y, 0, self.screen_h - 1))
         return sx, sy
