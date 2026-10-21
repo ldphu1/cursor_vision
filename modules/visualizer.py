@@ -5,12 +5,12 @@ import numpy as np
 from .config import (
     RIGHT_EYE_OUTER_IDX,
     RIGHT_EYE_INNER_IDX,
-    RIGHT_IRIS_INDICES,
+    RIGHT_IRIS_CENTER_IDX,
     RIGHT_EYE_TOP_IDX,
     RIGHT_EYE_BOTTOM_IDX,
     LEFT_EYE_INNER_IDX,
     LEFT_EYE_OUTER_IDX,
-    LEFT_IRIS_INDICES,
+    LEFT_IRIS_CENTER_IDX,
     LEFT_EYE_TOP_IDX,
     LEFT_EYE_BOTTOM_IDX,
     NOSE_TIP_IDX,
@@ -27,8 +27,9 @@ def draw_visuals(
     draw_bbox: bool = True
 ) -> Tuple[np.ndarray, Optional[List[float]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
     """
-    Trích xuất Feature Vector 12 chiều ổn định cao:
-        [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg, ear_avg, head_x, head_y, pitch_norm, yaw_norm, roll_norm]
+    Trích xuất Feature Vector 8 chiều kết hợp Deep Blendshapes + Hình học mống mắt:
+        [bs_x, bs_y, rx_avg, ry_avg, bs_x_l, bs_x_r, bs_y_l, bs_y_r]
+    - Hoàn toàn miễn nhiễm với lỗi phóng đại phương sai góc đầu (Head-Pose Scaling Trap).
     """
     h, w, _ = frame.shape
     annotated = frame.copy()
@@ -38,28 +39,19 @@ def draw_visuals(
 
     landmarks = detection_result.face_landmarks[0]
     transform_matrices = detection_result.facial_transformation_matrixes
+    blendshapes_list = getattr(detection_result, "face_blendshapes", None)
 
-    # Trung bình cộng 5 điểm mốc mống mắt trái & phải để triệt tiêu nhiễu landmark đơn lẻ
-    p_l_iris = (
-        float(np.mean([landmarks[i].x for i in LEFT_IRIS_INDICES]) * w),
-        float(np.mean([landmarks[i].y for i in LEFT_IRIS_INDICES]) * h),
-    )
-    p_r_iris = (
-        float(np.mean([landmarks[i].x for i in RIGHT_IRIS_INDICES]) * w),
-        float(np.mean([landmarks[i].y for i in RIGHT_IRIS_INDICES]) * h),
-    )
+    p_l_out  = (landmarks[LEFT_EYE_OUTER_IDX].x  * w, landmarks[LEFT_EYE_OUTER_IDX].y  * h)
+    p_l_in   = (landmarks[LEFT_EYE_INNER_IDX].x  * w, landmarks[LEFT_EYE_INNER_IDX].y  * h)
+    p_l_top  = (landmarks[LEFT_EYE_TOP_IDX].x    * w, landmarks[LEFT_EYE_TOP_IDX].y    * h)
+    p_l_bot  = (landmarks[LEFT_EYE_BOTTOM_IDX].x * w, landmarks[LEFT_EYE_BOTTOM_IDX].y * h)
+    p_l_iris = (landmarks[LEFT_IRIS_CENTER_IDX].x * w, landmarks[LEFT_IRIS_CENTER_IDX].y * h)
 
-    # Tọa độ pixel các mốc mắt trái
-    p_l_out = (landmarks[LEFT_EYE_OUTER_IDX].x * w, landmarks[LEFT_EYE_OUTER_IDX].y * h)
-    p_l_in  = (landmarks[LEFT_EYE_INNER_IDX].x * w, landmarks[LEFT_EYE_INNER_IDX].y * h)
-    p_l_top = (landmarks[LEFT_EYE_TOP_IDX].x   * w, landmarks[LEFT_EYE_TOP_IDX].y   * h)
-    p_l_bot = (landmarks[LEFT_EYE_BOTTOM_IDX].x * w, landmarks[LEFT_EYE_BOTTOM_IDX].y * h)
-
-    # Tọa độ pixel các mốc mắt phải
-    p_r_in  = (landmarks[RIGHT_EYE_INNER_IDX].x * w, landmarks[RIGHT_EYE_INNER_IDX].y * h)
-    p_r_out = (landmarks[RIGHT_EYE_OUTER_IDX].x * w, landmarks[RIGHT_EYE_OUTER_IDX].y * h)
-    p_r_top = (landmarks[RIGHT_EYE_TOP_IDX].x   * w, landmarks[RIGHT_EYE_TOP_IDX].y   * h)
-    p_r_bot = (landmarks[RIGHT_EYE_BOTTOM_IDX].x * w, landmarks[RIGHT_EYE_BOTTOM_IDX].y * h)
+    p_r_in   = (landmarks[RIGHT_EYE_INNER_IDX].x  * w, landmarks[RIGHT_EYE_INNER_IDX].y  * h)
+    p_r_out  = (landmarks[RIGHT_EYE_OUTER_IDX].x  * w, landmarks[RIGHT_EYE_OUTER_IDX].y  * h)
+    p_r_top  = (landmarks[RIGHT_EYE_TOP_IDX].x    * w, landmarks[RIGHT_EYE_TOP_IDX].y    * h)
+    p_r_bot  = (landmarks[RIGHT_EYE_BOTTOM_IDX].x * w, landmarks[RIGHT_EYE_BOTTOM_IDX].y * h)
+    p_r_iris = (landmarks[RIGHT_IRIS_CENTER_IDX].x * w, landmarks[RIGHT_IRIS_CENTER_IDX].y * h)
 
     rx_l, ry_l, ear_l, ex_l, ey_l, L_l, H_l = compute_eye_metrics(
         p_l_out, p_l_in, p_l_top, p_l_bot, p_l_iris
@@ -68,7 +60,29 @@ def draw_visuals(
         p_r_in, p_r_out, p_r_top, p_r_bot, p_r_iris
     )
 
-    is_blinking = (ear_l < BLINK_EAR_THRESHOLD or ear_r < BLINK_EAR_THRESHOLD)
+    rx_avg = float(0.5 * (rx_l + rx_r))
+    ry_avg = float(0.5 * (ry_l + ry_r))
+    ear_avg = float(0.5 * (ear_l + ear_r))
+
+    # Trích xuất 8 hệ số cơ xoay nhãn cầu từ mạng MediaPipe Face Blendshapes
+    bs_x_l, bs_x_r = rx_l - 0.5, rx_r - 0.5
+    bs_y_l, bs_y_r = ry_l, ry_r
+    blink_bs = 0.0
+
+    if blendshapes_list and len(blendshapes_list) > 0:
+        bs = {c.category_name: float(c.score) for c in blendshapes_list[0]}
+        # Hướng ngang (Screen-Right): kết hợp cơ kéo mắt vào trong (In) và ra ngoài (Out)
+        bs_x_l = bs.get("eyeLookInLeft", 0.0) - bs.get("eyeLookOutLeft", 0.0)
+        bs_x_r = bs.get("eyeLookOutRight", 0.0) - bs.get("eyeLookInRight", 0.0)
+        # Hướng dọc (Screen-Down): cơ nhìn xuống (Down) trừ cơ nhìn lên (Up)
+        bs_y_l = bs.get("eyeLookDownLeft", 0.0) - bs.get("eyeLookUpLeft", 0.0)
+        bs_y_r = bs.get("eyeLookDownRight", 0.0) - bs.get("eyeLookUpRight", 0.0)
+        blink_bs = 0.5 * (bs.get("eyeBlinkLeft", 0.0) + bs.get("eyeBlinkRight", 0.0))
+
+    bs_x = float(0.5 * (bs_x_l + bs_x_r))
+    bs_y = float(0.5 * (bs_y_l + bs_y_r))
+
+    is_blinking = (ear_l < BLINK_EAR_THRESHOLD or ear_r < BLINK_EAR_THRESHOLD or blink_bs > 0.45)
 
     pitch, yaw, roll = 0.0, 0.0, 0.0
     dir_txt = "Level"
@@ -76,31 +90,25 @@ def draw_visuals(
     if transform_matrices and len(transform_matrices) > 0:
         pitch, yaw, roll, rmat, dir_txt = get_head_pose_from_matrix(transform_matrices[0])
 
-    # Tâm giữa 2 mắt chuẩn hóa [-0.5, 0.5] để bù sai số dịch chuyển đầu (Parallax compensation)
-    eye_center_x = 0.25 * (p_l_out[0] + p_l_in[0] + p_r_in[0] + p_r_out[0]) / w - 0.5
-    eye_center_y = 0.25 * (p_l_out[1] + p_l_in[1] + p_r_in[1] + p_r_out[1]) / h - 0.5
-
-    rx_avg  = float(0.5 * (rx_l + rx_r))
-    ry_avg  = float(0.5 * (ry_l + ry_r))
-    ear_avg = float(0.5 * (ear_l + ear_r))
-    p_norm  = float(pitch / 30.0)
-    y_norm  = float(yaw / 30.0)
-    r_norm  = float(roll / 30.0)
+    # Bù trừ góc đầu trực tiếp bằng lượng giác vật lý (không đưa vào bộ học máy để tránh overfit)
+    gx_comp = bs_x + 0.008 * yaw
+    gy_comp = bs_y - 0.008 * pitch
 
     feature_vector: List[float] = [
-        rx_l, ry_l,
-        rx_r, ry_r,
-        rx_avg, ry_avg,
-        ear_avg,
-        float(eye_center_x),
-        float(eye_center_y),
-        p_norm, y_norm, r_norm,
+        gx_comp,
+        gy_comp,
+        rx_avg,
+        ry_avg,
+        float(bs_x_l),
+        float(bs_x_r),
+        float(bs_y_l),
+        float(bs_y_r),
     ]
 
     eye_info: Dict[str, Any] = {
         "rx_l": rx_l, "ry_l": ry_l, "ear_l": ear_l, "L_l": L_l,
         "rx_r": rx_r, "ry_r": ry_r, "ear_r": ear_r, "L_r": L_r,
-        "rx_avg": rx_avg, "ry_avg": ry_avg, "ear_avg": ear_avg,
+        "rx_avg": bs_x, "ry_avg": bs_y, "ear_avg": ear_avg,
         "iris_l": (int(p_l_iris[0]), int(p_l_iris[1])),
         "iris_r": (int(p_r_iris[0]), int(p_r_iris[1])),
         "is_blinking": is_blinking,
@@ -109,7 +117,6 @@ def draw_visuals(
         "pitch": pitch, "yaw": yaw, "roll": roll, "direction": dir_txt,
     }
 
-    # Vẽ viền hốc mắt và bounding box
     l_pts = np.array(
         [(int(landmarks[i].x * w), int(landmarks[i].y * h)) for i in LEFT_EYE_CONTOUR],
         dtype=np.int32,
@@ -172,22 +179,21 @@ def draw_hud(
     fps: float,
     mouse_enabled: bool = False,
 ):
-    """Vẽ bảng thông tin trực quan HUD lên frame camera."""
-    panel_w, panel_h = 385, 230
+    panel_w, panel_h = 395, 230
 
     overlay = frame.copy()
     cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
     cv2.rectangle(frame, (10, 10), (10 + panel_w, 10 + panel_h), (80, 80, 80), 1)
 
-    cv2.putText(frame, f"Gaze Tracker v2.3 | FPS: {int(fps)}", (20, 32),
+    cv2.putText(frame, f"Gaze Tracker v3.0 | FPS: {int(fps)}", (20, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2, cv2.LINE_AA)
 
     if is_calibrating:
-        status_txt   = "DANG HIEU CHUAN 9 DIEM..."
+        status_txt   = "DANG HIEU CHUAN 9 DIEM (GPR + Grid)..."
         status_color = (0, 255, 255)
     elif has_model:
-        status_txt   = "DA KET NOI MAN HINH (Poly-RidgeCV)"
+        status_txt   = "DA KET NOI (Blendshapes + GPR)"
         status_color = (0, 255, 0)
     else:
         status_txt   = "CHUA HIEU CHUAN  [C] de bat dau"
@@ -201,7 +207,7 @@ def draw_hud(
         blink = eye_info.get("is_blinking", False)
         blink_tag = "  [CHOP MAT]" if blink else ""
         col       = (0, 80, 255) if blink else (255, 220, 100)
-        cv2.putText(frame, f"Mat (L/R): rx={eye_info['rx_avg']:.3f}  ry={eye_info['ry_avg']:.3f}{blink_tag}",
+        cv2.putText(frame, f"BlendGaze: gx={eye_info['rx_avg']:+.3f}  gy={eye_info['ry_avg']:+.3f}{blink_tag}",
                     (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.41, col, 1, cv2.LINE_AA)
         cv2.putText(frame, f"EAR avg: {eye_info['ear_avg']:.3f}  (Nguong: {BLINK_EAR_THRESHOLD})",
                     (20, 101), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 220, 100), 1, cv2.LINE_AA)
@@ -234,7 +240,6 @@ def render_screen_canvas(
     gaze_screen_pt: Optional[Tuple[int, int]],
     has_model: bool,
 ) -> np.ndarray:
-    """Tạo màn hình mô phỏng (Screen Canvas): hiệu chuẩn 2 giai đoạn hoặc con trỏ ánh mắt."""
     canvas = np.zeros((screen_h, screen_w, 3), dtype=np.uint8)
 
     for gx in range(0, screen_w, max(1, screen_w // 8)):
@@ -260,7 +265,7 @@ def render_screen_canvas(
                         (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 255, 255), 2, cv2.LINE_AA)
         else:
             col = (0, 0, 255) if blinking else (0, 255, 0)
-            msg = "CHOP MAT — Tam dung" if blinking else f"Giữ ánh mắt ({step+1}/{total})"
+            msg = "CHOP MAT — Tam dung" if blinking else f"Dang ghi (diem {step+1}/{total})"
             cv2.circle(canvas, pt, 18, col, 2, cv2.LINE_AA)
             cv2.circle(canvas, pt, 6, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.ellipse(canvas, pt, (28, 28), 0, -90, -90 + int(progress * 360), col, 3, cv2.LINE_AA)
