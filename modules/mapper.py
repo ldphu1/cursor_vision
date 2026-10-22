@@ -1,10 +1,11 @@
+import math
 import os
 import time
 from typing import Optional, Tuple, List, Dict, Any
 import joblib
 import numpy as np
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import RobustScaler, PolynomialFeatures
+from sklearn.preprocessing import RobustScaler, FunctionTransformer
 from sklearn.linear_model import RidgeCV
 
 from .config import (
@@ -17,35 +18,76 @@ from .config import (
     ONE_EURO_MIN_CUTOFF,
     ONE_EURO_BETA,
     ONE_EURO_D_CUTOFF,
+    DEAD_ZONE_RADIUS,
+    RECENTER_SMOOTH_FACTOR,
 )
 from .geometry import OneEuroFilter
 
 FEATURE_DIM = 12
-MODEL_VERSION = "poly_ridge_v2.3"
+EXPANDED_FEATURE_DIM = 19
+MODEL_VERSION = "dual_poly_ridge_v3.0"
 
 
-def _build_pipeline() -> Pipeline:
+def expand_features(X: np.ndarray) -> np.ndarray:
     """
-    Pipeline Hồi quy Đa thức bậc 2 + RidgeCV:
-    - RobustScaler: chống lại các giá trị ngoại lai (outliers) tốt hơn StandardScaler.
-    - PolynomialFeatures(degree=2): mô hình hóa chính xác hình học cầu của nhãn cầu
-      và sự tương tác chéo giữa góc nhìn mắt (rx, ry) với vị trí/góc đầu (head pose).
-    - RidgeCV: tự động chọn hệ số điều chuẩn alpha tối ưu bằng Leave-One-Out CV,
-      đảm bảo nội suy mượt và ngoại suy chính xác ra sát 4 cạnh màn hình.
+    Biến đổi mở rộng đặc trưng có định hướng vật lý (Domain-specific Physical Interaction):
+    Thay thế PolynomialFeatures bậc 2 thuần túy (90 chiều) bằng 19 chiều tinh gọn:
+    - 6 đặc trưng mắt cốt lõi: [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg]
+    - 3 đặc trưng phi tuyến nhãn cầu: [rx_avg^2, ry_avg^2, rx_avg * ry_avg]
+    - 5 đặc trưng tư thế đầu: [head_x, head_y, pitch_norm, yaw_norm, roll_norm]
+    - 2 đặc trưng phi tuyến góc quay đầu: [pitch_norm^2, yaw_norm^2]
+    - 3 tương tác chéo mắt - đầu:
+        + rx_avg * yaw_norm (mắt liếc ngang bù trừ xoay đầu ngang)
+        + ry_avg * pitch_norm (mắt liếc dọc bù trừ gật đầu)
+        + rx_avg * pitch_norm (hiệu ứng phối cảnh khi đầu gật)
+    Tổng cộng: 6 + 3 + 5 + 2 + 3 = 19 chiều.
     """
-    alphas = np.logspace(-2, 3, 30)
+    X_arr = np.asarray(X, dtype=np.float64)
+    is_1d = (X_arr.ndim == 1)
+    if is_1d:
+        X_arr = np.expand_dims(X_arr, axis=0)
+
+    rx_l = X_arr[:, 0]
+    ry_l = X_arr[:, 1]
+    rx_r = X_arr[:, 2]
+    ry_r = X_arr[:, 3]
+    rx_avg = X_arr[:, 4]
+    ry_avg = X_arr[:, 5]
+    ear_avg = X_arr[:, 6]
+    head_x = X_arr[:, 7]
+    head_y = X_arr[:, 8]
+    pitch_n = X_arr[:, 9]
+    yaw_n = X_arr[:, 10]
+    roll_n = X_arr[:, 11]
+
+    f_eye = [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg]
+    f_eye_poly = [rx_avg**2, ry_avg**2, rx_avg * ry_avg]
+    f_head = [head_x, head_y, pitch_n, yaw_n, roll_n]
+    f_head_poly = [pitch_n**2, yaw_n**2]
+    f_cross = [rx_avg * yaw_n, ry_avg * pitch_n, rx_avg * pitch_n]
+
+    out = np.column_stack(f_eye + f_eye_poly + f_head + f_head_poly + f_cross)
+    return out[0] if is_1d else out
+
+
+def _build_axis_pipeline(alphas: np.ndarray) -> Pipeline:
+    """
+    Pipeline cho từng trục (X hoặc Y):
+    - FunctionTransformer: Mở rộng đặc trưng 19 chiều có ý nghĩa vật lý.
+    - RobustScaler: Chống ngoại lai, chuẩn hóa dữ liệu bền vững.
+    - RidgeCV: Chọn hệ số điều chuẩn alpha tối ưu độc lập cho trục tương ứng.
+    """
     return Pipeline([
+        ("expand", FunctionTransformer(expand_features, validate=False)),
         ("scaler", RobustScaler()),
-        ("poly", PolynomialFeatures(degree=2, include_bias=False)),
         ("ridge", RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")),
     ])
 
 
 class GazeScreenMapper:
     """
-    Quản lý quy trình hiệu chuẩn 9 điểm và ánh xạ ánh mắt lên màn hình máy tính.
-    Vector đầu vào 12 chiều:
-        [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg, ear_avg, head_x, head_y, pitch_norm, yaw_norm, roll_norm]
+    Quản lý quy trình hiệu chuẩn 9 điểm và ánh xạ ánh mắt lên màn hình máy tính
+    sử dụng kiến trúc Dual-Axis RidgeCV với đặc trưng 19D và bộ bù trôi nhanh.
     """
 
     def __init__(
@@ -57,10 +99,19 @@ class GazeScreenMapper:
         self.screen_w = screen_w
         self.screen_h = screen_h
         self.model_path = model_path
-        self.model: Optional[Pipeline] = None
+        self.model_x: Optional[Pipeline] = None
+        self.model_y: Optional[Pipeline] = None
 
         self.filter_x = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
         self.filter_y = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
+
+        # Bù trôi nhanh (Quick Re-centering) & Chống rung vi nhãn cầu
+        self.offset_x: float = 0.0
+        self.offset_y: float = 0.0
+        self.last_raw_x: Optional[float] = None
+        self.last_raw_y: Optional[float] = None
+        self.last_smooth_x: Optional[float] = None
+        self.last_smooth_y: Optional[float] = None
 
         mx, my = CALIB_MARGIN_X, CALIB_MARGIN_Y
         self.norm_calib_points: List[Tuple[float, float]] = [
@@ -92,6 +143,13 @@ class GazeScreenMapper:
 
         self.load_model()
 
+    @property
+    def model(self):
+        """Thuộc tính tương thích ngược: trả về tuple (model_x, model_y) nếu đã có mô hình."""
+        if self.model_x is not None and self.model_y is not None:
+            return (self.model_x, self.model_y)
+        return None
+
     def start_calibration(self):
         """Bắt đầu phiên hiệu chuẩn 9 điểm toàn màn hình."""
         self.is_calibrating = True
@@ -100,9 +158,13 @@ class GazeScreenMapper:
         self.current_point_samples = []
         self.X_data = []
         self.Y_data = []
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.last_smooth_x = None
+        self.last_smooth_y = None
         self.filter_x.reset()
         self.filter_y.reset()
-        print("\n[+] Bắt đầu hiệu chuẩn 9 điểm (Poly-RidgeCV 12D)!")
+        print("\n[+] Bắt đầu hiệu chuẩn 9 điểm (Dual-Axis RidgeCV 19D)!")
         print("[+] Hãy giữ đầu tự nhiên và nhìn thẳng vào tâm chấm tròn...")
 
     def update_calibration(
@@ -155,8 +217,8 @@ class GazeScreenMapper:
 
     def _finalize_current_point(self, target_norm: Tuple[float, float]):
         """
-        Lọc mẫu ngoại lai tập trung vào các đặc trưng mắt cốt lõi (rx_l..ry_avg)
-        và kết hợp tâm cụm (Median Centroid) để triệt tiêu nhiễu vi mô tại chỗ.
+        Lọc mẫu ngoại lai bằng khoảng cách MAD trên 6 đặc trưng mắt chính.
+        Giữ lại các mẫu sạch tự nhiên và thêm trọng số cho tâm cụm (centroid) làm điểm neo.
         """
         n_raw = len(self.current_point_samples)
         if n_raw < 3:
@@ -164,29 +226,26 @@ class GazeScreenMapper:
             return
 
         samples = np.array(self.current_point_samples, dtype=np.float64)
-        # Tính khoảng cách MAD trên 6 đặc trưng mắt chính [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg]
         eye_feats = samples[:, :6]
         median_eye = np.median(eye_feats, axis=0)
         dists = np.linalg.norm(eye_feats - median_eye, axis=1)
         mad = max(np.median(dists), 1e-6)
 
-        # Giữ lại 70% mẫu gần tâm nhất hoặc trong ngưỡng 1.8 * MAD
-        threshold = max(1.8 * mad, np.percentile(dists, 70))
+        threshold = max(2.0 * mad, np.percentile(dists, 80))
         mask = dists <= threshold
         clean = samples[mask] if mask.sum() >= 3 else samples
 
-        # Tính tâm cụm sạch (trimmed mean + median) làm điểm neo chuẩn xác
+        # Tính tâm cụm sạch (trimmed mean + median) làm điểm neo
         centroid = 0.5 * (np.median(clean, axis=0) + np.mean(clean, axis=0))
 
         tx, ty = target_norm
-        # Đưa các mẫu đã làm mịn quanh tâm cụm vào tập huấn luyện (giảm 70% phương sai nhiễu nội cụm)
+        # Thêm các mẫu sạch tự nhiên để giữ phương sai học máy
         for s in clean:
-            stabilized_sample = 0.65 * centroid + 0.35 * s
-            self.X_data.append(stabilized_sample.tolist())
+            self.X_data.append(s.tolist())
             self.Y_data.append([tx, ty])
 
-        # Thêm trọng số cho chính tâm cụm
-        for _ in range(5):
+        # Thêm trọng số cho tâm cụm (3 lần)
+        for _ in range(3):
             self.X_data.append(centroid.tolist())
             self.Y_data.append([tx, ty])
 
@@ -194,7 +253,7 @@ class GazeScreenMapper:
               f"lọc {len(clean)}/{n_raw} mẫu sạch (rx={centroid[4]:.3f}, ry={centroid[5]:.3f}).")
 
     def train_model(self):
-        """Huấn luyện mô hình Đa thức bậc 2 + RidgeCV."""
+        """Huấn luyện mô hình Dual-Axis RidgeCV với alpha tối ưu riêng biệt cho X và Y."""
         if len(self.X_data) < 15:
             print("[!] Không đủ dữ liệu huấn luyện.")
             return
@@ -202,22 +261,39 @@ class GazeScreenMapper:
         X = np.array(self.X_data, dtype=np.float64)
         Y = np.array(self.Y_data, dtype=np.float64)
 
-        print(f"\n[+] Huấn luyện Poly-RidgeCV trên {len(X)} mẫu (Vector 12 chiều)...")
+        print(f"\n[+] Huấn luyện Dual-Axis RidgeCV trên {len(X)} mẫu (Vector 19 chiều vật lý)...")
         t0 = time.time()
-        self.model = _build_pipeline()
-        self.model.fit(X, Y)
+
+        alphas_x = np.logspace(-3, 3, 35)
+        alphas_y = np.logspace(-2, 4, 35)
+
+        self.model_x = _build_axis_pipeline(alphas_x)
+        self.model_y = _build_axis_pipeline(alphas_y)
+
+        self.model_x.fit(X, Y[:, 0])
+        self.model_y.fit(X, Y[:, 1])
         dt = (time.time() - t0) * 1000
 
-        pred = self.model.predict(X)
-        rmse = float(np.sqrt(np.mean(
-            (pred[:, 0] * self.screen_w - Y[:, 0] * self.screen_w) ** 2 +
-            (pred[:, 1] * self.screen_h - Y[:, 1] * self.screen_h) ** 2
-        )))
-        best_alpha = self.model.named_steps["ridge"].alpha_
-        print(f"[+] Huấn luyện hoàn tất trong {dt:.1f}ms | Alpha tối ưu: {best_alpha:.3f} | Sai số RMSE: {rmse:.1f}px")
+        pred_x = self.model_x.predict(X)
+        pred_y = self.model_y.predict(X)
+
+        rmse_x = float(np.sqrt(np.mean((pred_x * self.screen_w - Y[:, 0] * self.screen_w) ** 2)))
+        rmse_y = float(np.sqrt(np.mean((pred_y * self.screen_h - Y[:, 1] * self.screen_h) ** 2)))
+        rmse = float(np.sqrt(rmse_x**2 + rmse_y**2))
+
+        best_alpha_x = self.model_x.named_steps["ridge"].alpha_
+        best_alpha_y = self.model_y.named_steps["ridge"].alpha_
+        print(f"[+] Huấn luyện hoàn tất trong {dt:.1f}ms | Alpha X: {best_alpha_x:.3f}, Alpha Y: {best_alpha_y:.3f} | RMSE: {rmse:.1f}px (X:{rmse_x:.1f}px, Y:{rmse_y:.1f}px)")
+
+        self.offset_x = 0.0
+        self.offset_y = 0.0
 
         try:
-            payload = {"version": MODEL_VERSION, "model": self.model}
+            payload = {
+                "version": MODEL_VERSION,
+                "model_x": self.model_x,
+                "model_y": self.model_y,
+            }
             joblib.dump(payload, self.model_path)
             print(f"[+] Đã lưu mô hình vào: {self.model_path}")
         except Exception as e:
@@ -230,33 +306,99 @@ class GazeScreenMapper:
         try:
             loaded = joblib.load(self.model_path)
             if isinstance(loaded, dict) and loaded.get("version") == MODEL_VERSION:
-                self.model = loaded["model"]
+                self.model_x = loaded["model_x"]
+                self.model_y = loaded["model_y"]
                 print(f"[+] Đã tải mô hình {MODEL_VERSION} từ: {self.model_path}")
             else:
-                print("[!] Phát hiện file model phiên bản cũ (SVR/khác hệ đặc trưng).")
-                print("[*] Hãy nhấn phím 'C' để hiệu chuẩn lại với thuật toán mới.")
-                self.model = None
+                old_ver = loaded.get("version") if isinstance(loaded, dict) else "unknown"
+                print(f"[!] Phát hiện file model phiên bản cũ ({old_ver}).")
+                print("[*] Hãy nhấn phím 'C' để hiệu chuẩn lại với thuật toán Dual-Axis v3.0.")
+                self.model_x = None
+                self.model_y = None
         except Exception as e:
             print(f"[!] Lỗi khi tải model: {e}")
-            self.model = None
+            self.model_x = None
+            self.model_y = None
+
+    def apply_recenter(
+        self,
+        pred_raw_x: Optional[float] = None,
+        pred_raw_y: Optional[float] = None,
+    ) -> Tuple[float, float]:
+        """
+        Bù lệch nhanh: Giả định mắt đang nhìn vào tâm màn hình (screen_w / 2, screen_h / 2).
+        Tính delta offset = target - pred_raw và áp dụng làm mượt hệ số.
+        """
+        target_x = self.screen_w / 2.0
+        target_y = self.screen_h / 2.0
+
+        curr_x = pred_raw_x if pred_raw_x is not None else self.last_raw_x
+        curr_y = pred_raw_y if pred_raw_y is not None else self.last_raw_y
+
+        if curr_x is None or curr_y is None:
+            return self.offset_x, self.offset_y
+
+        diff_x = target_x - curr_x
+        diff_y = target_y - curr_y
+
+        self.offset_x = float(self.offset_x * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_x * RECENTER_SMOOTH_FACTOR)
+        self.offset_y = float(self.offset_y * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_y * RECENTER_SMOOTH_FACTOR)
+
+        print(f"[+] Re-center thành công! Offset mới: dx={self.offset_x:+.1f}px, dy={self.offset_y:+.1f}px")
+        return self.offset_x, self.offset_y
+
+    def reset_offset(self):
+        """Đặt lại offset bù trôi về 0."""
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        print("[*] Đã reset offset về (0, 0)")
 
     def predict(
         self,
         feature_vector: List[float],
         timestamp: Optional[float] = None,
     ) -> Optional[Tuple[int, int]]:
-        """Dự đoán tọa độ màn hình (Sx, Sy) và lọc mượt bằng One Euro Filter."""
-        if self.model is None or feature_vector is None:
+        """Dự đoán tọa độ màn hình (Sx, Sy), bù trôi, lọc 1€ Filter và áp dụng dead-zone vi mô."""
+        if self.model_x is None or self.model_y is None or feature_vector is None:
             return None
 
         t = timestamp if timestamp is not None else time.time()
-        pred_norm = self.model.predict(np.array([feature_vector], dtype=np.float64))[0]
+        feat_arr = np.array([feature_vector], dtype=np.float64)
+        pred_norm_x = float(self.model_x.predict(feat_arr)[0])
+        pred_norm_y = float(self.model_y.predict(feat_arr)[0])
 
-        # Áp dụng lọc 1€ trước khi kẹp biên để tránh hiệu ứng dính viền
-        smooth_norm_x = self.filter_x.filter(float(pred_norm[0]), t)
-        smooth_norm_y = self.filter_y.filter(float(pred_norm[1]), t)
+        raw_x = pred_norm_x * self.screen_w
+        raw_y = pred_norm_y * self.screen_h
+        self.last_raw_x = raw_x
+        self.last_raw_y = raw_y
 
-        sx = int(np.clip(smooth_norm_x * self.screen_w, 0, self.screen_w - 1))
-        sy = int(np.clip(smooth_norm_y * self.screen_h, 0, self.screen_h - 1))
+        # Áp dụng offset bù trôi
+        adjusted_x = raw_x + self.offset_x
+        adjusted_y = raw_y + self.offset_y
+
+        norm_adj_x = adjusted_x / self.screen_w
+        norm_adj_y = adjusted_y / self.screen_h
+
+        smooth_norm_x = self.filter_x.filter(norm_adj_x, t)
+        smooth_norm_y = self.filter_y.filter(norm_adj_y, t)
+
+        target_sx = smooth_norm_x * self.screen_w
+        target_sy = smooth_norm_y * self.screen_h
+
+        # Vùng chết vi mô (Dead-zone) chống rung vi nhãn cầu khi nhìn cố định
+        if self.last_smooth_x is not None and self.last_smooth_y is not None:
+            dist_shift = math.hypot(target_sx - self.last_smooth_x, target_sy - self.last_smooth_y)
+            if dist_shift < DEAD_ZONE_RADIUS:
+                target_sx = self.last_smooth_x
+                target_sy = self.last_smooth_y
+            else:
+                self.last_smooth_x = target_sx
+                self.last_smooth_y = target_sy
+        else:
+            self.last_smooth_x = target_sx
+            self.last_smooth_y = target_sy
+
+        sx = int(np.clip(target_sx, 0, self.screen_w - 1))
+        sy = int(np.clip(target_sy, 0, self.screen_h - 1))
 
         return sx, sy

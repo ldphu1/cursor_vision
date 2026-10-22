@@ -16,7 +16,9 @@ class GazeTracker:
     Trình điều phối theo dõi ánh mắt và điều khiển con trỏ:
     - Nhận diện khuôn mặt & mống mắt 3D qua MediaPipe.
     - Hiệu chuẩn 9 điểm toàn màn hình với bộ lọc loại bỏ chớp mắt & nhiễu.
-    - Ánh xạ RidgeCV + Polynomial bậc 2 kèm bộ lọc 1€ Filter triệt tiêu rung giật.
+    - Ánh xạ Dual-Axis RidgeCV với đặc trưng 19D định hướng vật lý.
+    - Bộ lọc 1€ Filter + Dead-zone vi mô triệt tiêu rung giật.
+    - Bù trôi nhanh (Quick Re-centering) với phím 'R'.
     """
 
     def __init__(
@@ -33,6 +35,9 @@ class GazeTracker:
         self.mapper = GazeScreenMapper(self.screen_w, self.screen_h)
         self.last_gaze_pt: Optional[Tuple[int, int]] = None
         self.is_fullscreen = False
+
+        self.notification_msg: Optional[str] = None
+        self.notification_expire: float = 0.0
 
     def run(self):
         """Khởi chạy vòng lặp xử lý video."""
@@ -119,6 +124,8 @@ class GazeTracker:
                             # Khi chớp mắt: Giữ nguyên vị trí con trỏ cuối cùng, không nhảy giật
                             gaze_screen_pt = self.last_gaze_pt
 
+                current_notify = self.notification_msg if curr_time < self.notification_expire else None
+
                 # Vẽ Canvas màn hình
                 screen_canvas = render_screen_canvas(
                     screen_w=self.screen_w,
@@ -126,6 +133,7 @@ class GazeTracker:
                     calib_info=calib_info,
                     gaze_screen_pt=gaze_screen_pt,
                     has_model=(self.mapper.model is not None),
+                    notify_msg=current_notify,
                 )
 
                 # Vẽ HUD lên cửa sổ Camera
@@ -138,6 +146,8 @@ class GazeTracker:
                     has_model=(self.mapper.model is not None),
                     fps=fps,
                     mouse_enabled=move_mouse_enabled,
+                    offset=(self.mapper.offset_x, self.mapper.offset_y),
+                    notify_msg=current_notify,
                 )
 
                 # Hiển thị cả 2 cửa sổ
@@ -152,6 +162,20 @@ class GazeTracker:
                     cv2.setWindowProperty(screen_win_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
                     self.is_fullscreen = True
                     self.mapper.start_calibration()
+                elif key == ord("r") or key == ord("R"):
+                    # Phím tắt Cân giữa nhanh (Quick Re-centering) bù trôi
+                    if self.mapper.model is not None:
+                        dx, dy = self.mapper.apply_recenter()
+                        self.notification_msg = f"[+] DA CAN GIUA: Offset dx={dx:+.0f}px, dy={dy:+.0f}px"
+                        self.notification_expire = curr_time + 2.5
+                    else:
+                        self.notification_msg = "[!] Chua co mo hinh. Nhan [C] de hieu chuan."
+                        self.notification_expire = curr_time + 2.5
+                elif key == ord("z") or key == ord("Z"):
+                    # Reset offset bù trôi
+                    self.mapper.reset_offset()
+                    self.notification_msg = "[*] Da dat lai offset ve (0, 0)"
+                    self.notification_expire = curr_time + 2.0
                 elif key == ord("f") or key == ord("F"):
                     # Phím tắt chuyển đổi Toàn màn hình / Cửa sổ
                     self.is_fullscreen = not self.is_fullscreen

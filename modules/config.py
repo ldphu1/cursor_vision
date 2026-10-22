@@ -49,3 +49,7 @@ ONE_EURO_BETA = 0.015      # Bám sát tức thì khi liếc mắt nhanh
 ONE_EURO_D_CUTOFF = 1.0
 
 DEFAULT_ALPHA_SMOOTH = 0.35
+
+# Cấu hình bù trôi (Re-centering) & Chống rung vi nhãn cầu (Dead-zone)
+DEAD_ZONE_RADIUS = 5.0          # Bán kính vi mô (pixel) để loại bỏ rung nhãn cầu khi nhìn cố định
+RECENTER_SMOOTH_FACTOR = 0.5    # Hệ số làm mượt khi bù trôi

@@ -171,23 +171,25 @@ def draw_hud(
     has_model: bool,
     fps: float,
     mouse_enabled: bool = False,
+    offset: Optional[Tuple[float, float]] = None,
+    notify_msg: Optional[str] = None,
 ):
     """Vẽ bảng thông tin trực quan HUD lên frame camera."""
-    panel_w, panel_h = 385, 230
+    panel_w, panel_h = 390, 242
 
     overlay = frame.copy()
     cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
     cv2.rectangle(frame, (10, 10), (10 + panel_w, 10 + panel_h), (80, 80, 80), 1)
 
-    cv2.putText(frame, f"Gaze Tracker v2.3 | FPS: {int(fps)}", (20, 32),
+    cv2.putText(frame, f"Gaze Tracker v3.0 | FPS: {int(fps)}", (20, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2, cv2.LINE_AA)
 
     if is_calibrating:
         status_txt   = "DANG HIEU CHUAN 9 DIEM..."
         status_color = (0, 255, 255)
     elif has_model:
-        status_txt   = "DA KET NOI MAN HINH (Poly-RidgeCV)"
+        status_txt   = "DA KET NOI (Dual-Ridge v3.0)"
         status_color = (0, 255, 0)
     else:
         status_txt   = "CHUA HIEU CHUAN  [C] de bat dau"
@@ -214,17 +216,22 @@ def draw_hud(
                     (20, 142), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (180, 180, 180), 1, cv2.LINE_AA)
 
     if gaze_pt:
-        cv2.putText(frame, f"Toa do man hinh: X={gaze_pt[0]}  Y={gaze_pt[1]}",
-                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1, cv2.LINE_AA)
+        off_str = f" [Off: {offset[0]:+.0f},{offset[1]:+.0f}]" if (offset and (abs(offset[0]) > 0.5 or abs(offset[1]) > 0.5)) else ""
+        cv2.putText(frame, f"Toa do man hinh: X={gaze_pt[0]}  Y={gaze_pt[1]}{off_str}",
+                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1, cv2.LINE_AA)
     else:
         cv2.putText(frame, "Toa do man hinh: --",
-                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (130, 130, 130), 1, cv2.LINE_AA)
+                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (130, 130, 130), 1, cv2.LINE_AA)
 
     mcol = (0, 255, 0) if mouse_enabled else (160, 160, 160)
     cv2.putText(frame, f"Chuot [M]: {'BAT' if mouse_enabled else 'TAT'}",
                 (20, 192), cv2.FONT_HERSHEY_SIMPLEX, 0.42, mcol, 1, cv2.LINE_AA)
-    cv2.putText(frame, "[C] Hieu chuan | [F] Fullscreen | [Q] Thoat",
-                (20, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1, cv2.LINE_AA)
+
+    if notify_msg:
+        cv2.putText(frame, notify_msg, (20, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 100), 1, cv2.LINE_AA)
+    else:
+        cv2.putText(frame, "[C] Hieu chuan | [R] Can giua | [M] Chuot | [Q] Thoat",
+                    (20, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
 
 
 def render_screen_canvas(
@@ -233,6 +240,7 @@ def render_screen_canvas(
     calib_info: Optional[Dict[str, Any]],
     gaze_screen_pt: Optional[Tuple[int, int]],
     has_model: bool,
+    notify_msg: Optional[str] = None,
 ) -> np.ndarray:
     """Tạo màn hình mô phỏng (Screen Canvas): hiệu chuẩn 2 giai đoạn hoặc con trỏ ánh mắt."""
     canvas = np.zeros((screen_h, screen_w, 3), dtype=np.uint8)
@@ -241,6 +249,12 @@ def render_screen_canvas(
         cv2.line(canvas, (gx, 0), (gx, screen_h), (20, 20, 20), 1)
     for gy in range(0, screen_h, max(1, screen_h // 6)):
         cv2.line(canvas, (0, gy), (screen_w, gy), (20, 20, 20), 1)
+
+    if notify_msg:
+        cv2.rectangle(canvas, (screen_w // 2 - 250, 20), (screen_w // 2 + 250, 70), (40, 40, 40), -1)
+        cv2.rectangle(canvas, (screen_w // 2 - 250, 20), (screen_w // 2 + 250, 70), (0, 255, 120), 2)
+        cv2.putText(canvas, notify_msg, (screen_w // 2 - 230, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 120), 2, cv2.LINE_AA)
 
     if calib_info is not None:
         pt       = calib_info["point"]
@@ -260,7 +274,7 @@ def render_screen_canvas(
                         (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 255, 255), 2, cv2.LINE_AA)
         else:
             col = (0, 0, 255) if blinking else (0, 255, 0)
-            msg = "CHOP MAT — Tam dung" if blinking else f"Giữ ánh mắt ({step+1}/{total})"
+            msg = "CHOP MAT — Tam dung" if blinking else f"Giu anh mat ({step+1}/{total})"
             cv2.circle(canvas, pt, 18, col, 2, cv2.LINE_AA)
             cv2.circle(canvas, pt, 6, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.ellipse(canvas, pt, (28, 28), 0, -90, -90 + int(progress * 360), col, 3, cv2.LINE_AA)
@@ -281,7 +295,7 @@ def render_screen_canvas(
         cx, cy = screen_w // 2, screen_h // 2
         cv2.putText(canvas, "CHUA CO MO HINH HIEU CHUAN",
                     (cx - 280, cy - 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2, cv2.LINE_AA)
-        cv2.putText(canvas, "Nhan phim [C] de bat dau hieu chuan 9 diem (Fullscreen)",
-                    (cx - 380, cy + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (190, 190, 190), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "Nhan phim [C] de bat dau hieu chuan 9 diem (Dual-Axis v3.0)",
+                    (cx - 390, cy + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (190, 190, 190), 1, cv2.LINE_AA)
 
     return canvas

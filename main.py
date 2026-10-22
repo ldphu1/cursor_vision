@@ -23,18 +23,18 @@ def run(source=0, control_mouse=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MediaPipe Eye Gaze Tracking: Chuẩn hóa 2 mắt & Hồi quy Ridge lên màn hình"
+        description="MediaPipe Eye Gaze Tracking: Chuẩn hóa 2 mắt & Hồi quy Dual-Axis Ridge v3.0 lên màn hình"
     )
     parser.add_argument(
         "--source",
         type=str,
         default="0",
-        help="Nguồn video: '0' (webcam mặc định) hoặc đường dẫn file",
+        help="Nguon video: '0' (webcam mac dinh) hoac duong dan file",
     )
     parser.add_argument(
         "--control-mouse",
         action="store_true",
-        help="Kích hoạt điều khiển con trỏ chuột theo ánh mắt",
+        help="Kich hoat dieu khien con tro chuot theo anh mat",
     )
     args = parser.parse_args()
 
