@@ -1,17 +1,12 @@
-from collections import deque
+import math
 import os
 import time
 from typing import Optional, Tuple, List, Dict, Any
 import joblib
 import numpy as np
-<<<<<<< HEAD
-from sklearn.preprocessing import RobustScaler
-=======
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
->>>>>>> parent of b942f83 (update...)
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.svm import SVR
+from sklearn.preprocessing import RobustScaler, FunctionTransformer
+from sklearn.linear_model import RidgeCV
 
 from .config import (
     GAZE_MODEL_PATH,
@@ -23,139 +18,77 @@ from .config import (
     ONE_EURO_MIN_CUTOFF,
     ONE_EURO_BETA,
     ONE_EURO_D_CUTOFF,
+    DEAD_ZONE_RADIUS,
+    RECENTER_SMOOTH_FACTOR,
 )
 from .geometry import OneEuroFilter
 
-<<<<<<< HEAD
-FEATURE_DIM = 6
-MODEL_VERSION = "tps_svr_ensemble_v4.0"
-=======
-# Số chiều của Rich Feature Vector
 FEATURE_DIM = 12
->>>>>>> parent of b942f83 (update...)
+EXPANDED_FEATURE_DIM = 19
+MODEL_VERSION = "dual_poly_ridge_v3.0"
 
 
-class ThinPlateSplineWarper:
+def expand_features(X: np.ndarray) -> np.ndarray:
     """
-<<<<<<< HEAD
-    Nội suy mặt phẳng đàn hồi Thin-Plate Spline (TPS - Bookstein 1989):
-    - Mô hình hóa phép biến đổi từ tọa độ mắt sang màn hình bằng:
-      Mặt phẳng Affine toàn cục (a0 + ax*rx + ay*ry) + Độ uốn cong cục bộ tối thiểu năng lượng (r^2 * ln(r)).
-    - Khắc phục nhược điểm của Ridge (không uốn theo từng điểm được) và RBF/GPR (bị sụp ở rìa màn hình).
+    Biến đổi mở rộng đặc trưng có định hướng vật lý (Domain-specific Physical Interaction):
+    Thay thế PolynomialFeatures bậc 2 thuần túy (90 chiều) bằng 19 chiều tinh gọn:
+    - 6 đặc trưng mắt cốt lõi: [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg]
+    - 3 đặc trưng phi tuyến nhãn cầu: [rx_avg^2, ry_avg^2, rx_avg * ry_avg]
+    - 5 đặc trưng tư thế đầu: [head_x, head_y, pitch_norm, yaw_norm, roll_norm]
+    - 2 đặc trưng phi tuyến góc quay đầu: [pitch_norm^2, yaw_norm^2]
+    - 3 tương tác chéo mắt - đầu:
+        + rx_avg * yaw_norm (mắt liếc ngang bù trừ xoay đầu ngang)
+        + ry_avg * pitch_norm (mắt liếc dọc bù trừ gật đầu)
+        + rx_avg * pitch_norm (hiệu ứng phối cảnh khi đầu gật)
+    Tổng cộng: 6 + 3 + 5 + 2 + 3 = 19 chiều.
     """
+    X_arr = np.asarray(X, dtype=np.float64)
+    is_1d = (X_arr.ndim == 1)
+    if is_1d:
+        X_arr = np.expand_dims(X_arr, axis=0)
 
-    def __init__(self, smoothing: float = 0.008):
-        self.smoothing = smoothing
-        self.mean: Optional[np.ndarray] = None
-        self.scale: Optional[np.ndarray] = None
-        self.control_pts: Optional[np.ndarray] = None
-        self.weights: Optional[np.ndarray] = None
-        self.affine: Optional[np.ndarray] = None
+    rx_l = X_arr[:, 0]
+    ry_l = X_arr[:, 1]
+    rx_r = X_arr[:, 2]
+    ry_r = X_arr[:, 3]
+    rx_avg = X_arr[:, 4]
+    ry_avg = X_arr[:, 5]
+    ear_avg = X_arr[:, 6]
+    head_x = X_arr[:, 7]
+    head_y = X_arr[:, 8]
+    pitch_n = X_arr[:, 9]
+    yaw_n = X_arr[:, 10]
+    roll_n = X_arr[:, 11]
 
-    @staticmethod
-    def _kernel(r: np.ndarray) -> np.ndarray:
-        return (r ** 2) * np.log(r + 1e-8)
+    f_eye = [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg]
+    f_eye_poly = [rx_avg**2, ry_avg**2, rx_avg * ry_avg]
+    f_head = [head_x, head_y, pitch_n, yaw_n, roll_n]
+    f_head_poly = [pitch_n**2, yaw_n**2]
+    f_cross = [rx_avg * yaw_n, ry_avg * pitch_n, rx_avg * pitch_n]
 
-    def fit(self, G: np.ndarray, S: np.ndarray):
-        self.mean = np.mean(G, axis=0)
-        self.scale = np.maximum(np.std(G, axis=0), 1e-4)
-        P = (G - self.mean) / self.scale
-        self.control_pts = P
-
-        n, d = P.shape
-        dists = np.linalg.norm(P[:, None, :] - P[None, :, :], axis=-1)
-        K = self._kernel(dists) + self.smoothing * np.eye(n)
-        Q = np.hstack([np.ones((n, 1)), P])
-
-        # Hệ phương trình TPS: [K, Q; Q^T, 0] * [W; A] = [S; 0]
-        L = np.zeros((n + d + 1, n + d + 1), dtype=np.float64)
-        L[:n, :n] = K
-        L[:n, n:] = Q
-        L[n:, :n] = Q.T
-        L[n:, n:] = 1e-6 * np.eye(d + 1)
-
-        rhs = np.zeros((n + d + 1, 2), dtype=np.float64)
-        rhs[:n] = S
-
-        params = np.linalg.solve(L, rhs)
-        self.weights = params[:n]
-        self.affine = params[n:]
-        return self
-
-    def predict(self, G: np.ndarray) -> np.ndarray:
-        P = (G - self.mean) / self.scale
-        dists = np.linalg.norm(P[:, None, :] - self.control_pts[None, :, :], axis=-1)
-        U = self._kernel(dists)
-        Q = np.hstack([np.ones((len(P), 1)), P])
-        return Q @ self.affine + U @ self.weights
+    out = np.column_stack(f_eye + f_eye_poly + f_head + f_head_poly + f_cross)
+    return out[0] if is_1d else out
 
 
-class TPSSVREnsemble:
+def _build_axis_pipeline(alphas: np.ndarray) -> Pipeline:
     """
-    Kết hợp Thin-Plate Spline (TPS) và Support Vector Regression (SVR):
-    - TPS (60%): Nội suy hình học chính xác qua 13 tâm điểm trên cả mắt trung bình, mắt trái và mắt phải.
-    - SVR (40%): Học tương quan phi tuyến 6 chiều giữa 2 mắt với điều chuẩn chống nhiễu (C=2.0, epsilon=0.012).
-    """
-
-    def __init__(self):
-        self.tps_avg = ThinPlateSplineWarper(smoothing=0.006)
-        self.tps_full = ThinPlateSplineWarper(smoothing=0.015)
-        self.scaler = RobustScaler()
-        self.svr = MultiOutputRegressor(
-            SVR(kernel="rbf", C=2.0, epsilon=0.012, gamma="scale"),
-            n_jobs=-1,
-        )
-
-    def fit(self, X_all: np.ndarray, Y_all: np.ndarray, X_centroids: np.ndarray, Y_centroids: np.ndarray):
-        self.tps_avg.fit(X_centroids[:, :2], Y_centroids)
-        self.tps_full.fit(X_centroids, Y_centroids)
-
-        X_scaled = self.scaler.fit_transform(X_all)
-        self.svr.fit(X_scaled, Y_all)
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        pred_tps_avg = self.tps_avg.predict(X[:, :2])
-        pred_tps_full = self.tps_full.predict(X)
-        pred_svr = self.svr.predict(self.scaler.transform(X))
-        return 0.40 * pred_tps_avg + 0.25 * pred_tps_full + 0.35 * pred_svr
-
-
-class GazeScreenMapper:
-    """Quản lý hiệu chuẩn 13 điểm (9 điểm biên/tâm + 4 điểm phần tư trong) và ánh xạ TPS + SVR."""
-=======
-    SVR-RBF pipeline kết hợp StandardScaler:
-    - Kernel RBF nội suy phi tuyến mượt mà cho cả 12 đặc trưng.
-    - C=100.0: khớp chính xác dữ liệu hiệu chuẩn của từng người dùng.
-    - epsilon=0.001: miễn nhiễm với vi rung giật cảm biến nhỏ.
-    - Tốc độ: fit ~1.5s, predict ~10ms (đáp ứng 80-100 FPS).
+    Pipeline cho từng trục (X hoặc Y):
+    - FunctionTransformer: Mở rộng đặc trưng 19 chiều có ý nghĩa vật lý.
+    - RobustScaler: Chống ngoại lai, chuẩn hóa dữ liệu bền vững.
+    - RidgeCV: Chọn hệ số điều chuẩn alpha tối ưu độc lập cho trục tương ứng.
     """
     return Pipeline([
-        ("scaler", StandardScaler()),
-        ("svr", MultiOutputRegressor(
-            SVR(kernel="rbf", C=100.0, epsilon=0.001, gamma="scale"),
-            n_jobs=-1,
-        )),
+        ("expand", FunctionTransformer(expand_features, validate=False)),
+        ("scaler", RobustScaler()),
+        ("ridge", RidgeCV(alphas=alphas, scoring="neg_mean_squared_error")),
     ])
 
 
 class GazeScreenMapper:
     """
-    Quản lý quy trình hiệu chuẩn 9 điểm và ánh xạ ánh mắt lên màn hình máy tính.
-
-    Rich Feature Vector 12 chiều:
-        [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg, vergence, ear_avg, cross, pitch_norm, yaw_norm, roll_norm]
-        - rx_l, ry_l, rx_r, ry_r: Tọa độ mống mắt 2 bên (Screen-Right & Screen-Down).
-        - rx_avg, ry_avg: Trung bình cộng 2 mắt (triệt tiêu 50% vi rung giật webcam).
-        - vergence: Độ hội tụ mống mắt = rx_l - rx_r (xác định cự ly & góc xiên).
-        - ear_avg: Độ mở mí mắt trung bình (tín hiệu nhìn lên/xuống cực mạnh cho trục Y).
-        - cross: rx_avg * ry_avg (nội suy phi tuyến cho 4 góc chéo màn hình).
-        - pitch_norm, yaw_norm, roll_norm: Góc xoay đầu 3D (bù trừ cử động đầu nhẹ).
-
-    Pipeline: StandardScaler → SVR-RBF.
-    Smoothing: One Euro Filter (Casiez et al., CHI 2012) chống rung khi dừng nhìn và không trễ khi liếc nhanh.
+    Quản lý quy trình hiệu chuẩn 9 điểm và ánh xạ ánh mắt lên màn hình máy tính
+    sử dụng kiến trúc Dual-Axis RidgeCV với đặc trưng 19D và bộ bù trôi nhanh.
     """
->>>>>>> parent of b942f83 (update...)
 
     def __init__(
         self,
@@ -166,13 +99,20 @@ class GazeScreenMapper:
         self.screen_w = screen_w
         self.screen_h = screen_h
         self.model_path = model_path
-        self.model: Optional[TPSSVREnsemble] = None
+        self.model_x: Optional[Pipeline] = None
+        self.model_y: Optional[Pipeline] = None
 
-        self.raw_history: deque = deque(maxlen=3)
         self.filter_x = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
         self.filter_y = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
 
-        # 9 điểm hiệu chuẩn: Bắt đầu từ tâm, sau đó theo kim đồng hồ quanh 8 hướng
+        # Bù trôi nhanh (Quick Re-centering) & Chống rung vi nhãn cầu
+        self.offset_x: float = 0.0
+        self.offset_y: float = 0.0
+        self.last_raw_x: Optional[float] = None
+        self.last_raw_y: Optional[float] = None
+        self.last_smooth_x: Optional[float] = None
+        self.last_smooth_y: Optional[float] = None
+
         mx, my = CALIB_MARGIN_X, CALIB_MARGIN_Y
         self.norm_calib_points: List[Tuple[float, float]] = [
             (0.5,       0.5      ),  # 1. Tâm màn hình
@@ -184,78 +124,54 @@ class GazeScreenMapper:
             (0.5,       1.0 - my ),  # 7. Giữa dưới
             (mx,        1.0 - my ),  # 8. Góc dưới trái
             (mx,        0.5      ),  # 9. Giữa trái
-            (0.28,      0.28     ),  # 10. Tâm phần tư trên-trái
-            (0.72,      0.28     ),  # 11. Tâm phần tư trên-phải
-            (0.72,      0.72     ),  # 12. Tâm phần tư dưới-phải
-            (0.28,      0.72     ),  # 13. Tâm phần tư dưới-trái
         ]
         self.calib_points: List[Tuple[int, int]] = [
             (int(px * screen_w), int(py * screen_h))
             for px, py in self.norm_calib_points
         ]
 
-        self.is_calibrating     = False
-        self.calib_step         = 0
-        self.calib_start_time   = 0.0
-        self.settle_time        = CALIB_SETTLE_TIME
-        self.collect_time       = CALIB_COLLECT_TIME
-        self.time_per_point     = CALIB_TIME_PER_POINT
+        self.is_calibrating = False
+        self.calib_step = 0
+        self.calib_start_time = 0.0
+        self.settle_time = CALIB_SETTLE_TIME
+        self.collect_time = CALIB_COLLECT_TIME
+        self.time_per_point = CALIB_TIME_PER_POINT
 
         self.current_point_samples: List[List[float]] = []
         self.X_data: List[List[float]] = []
-<<<<<<< HEAD
         self.Y_data: List[List[float]] = []
-        self.X_centroids: List[List[float]] = []
-        self.Y_centroids: List[List[float]] = []
-=======
-        self.Y_data: List[List[float]] = []   # Tọa độ chuẩn hóa [0.0, 1.0]
->>>>>>> parent of b942f83 (update...)
 
         self.load_model()
 
-    # ------------------------------------------------------------------ #
-    # CALIBRATION                                                          #
-    # ------------------------------------------------------------------ #
+    @property
+    def model(self):
+        """Thuộc tính tương thích ngược: trả về tuple (model_x, model_y) nếu đã có mô hình."""
+        if self.model_x is not None and self.model_y is not None:
+            return (self.model_x, self.model_y)
+        return None
 
     def start_calibration(self):
-<<<<<<< HEAD
+        """Bắt đầu phiên hiệu chuẩn 9 điểm toàn màn hình."""
         self.is_calibrating = True
         self.calib_step = 0
         self.calib_start_time = time.time()
         self.current_point_samples = []
         self.X_data = []
         self.Y_data = []
-        self.X_centroids = []
-        self.Y_centroids = []
-        self.raw_history.clear()
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.last_smooth_x = None
+        self.last_smooth_y = None
         self.filter_x.reset()
         self.filter_y.reset()
-        print("\n[+] Bắt đầu hiệu chuẩn 13 điểm (Thin-Plate Spline + SVR Ensemble)!")
-        print("[+] Hãy tập trung nhìn vào chấm đỏ nhỏ ở tâm vòng tròn...")
-=======
-        """Bắt đầu phiên hiệu chuẩn 9 điểm toàn màn hình (Fullscreen)."""
-        self.is_calibrating         = True
-        self.calib_step             = 0
-        self.calib_start_time       = time.time()
-        self.current_point_samples  = []
-        self.X_data                 = []
-        self.Y_data                 = []
-        self.filter_x.reset()
-        self.filter_y.reset()
-        print("\n[+] Bắt đầu hiệu chuẩn 9 điểm độ chính xác cao (Rich 12D Vector)!")
-        print("[+] Hãy nhìn thẳng vào tâm chấm tròn mỗi khi điểm xuất hiện...")
->>>>>>> parent of b942f83 (update...)
+        print("\n[+] Bắt đầu hiệu chuẩn 9 điểm (Dual-Axis RidgeCV 19D)!")
+        print("[+] Hãy giữ đầu tự nhiên và nhìn thẳng vào tâm chấm tròn...")
 
     def update_calibration(
         self,
         feature_vector: Optional[List[float]],
         is_blinking: bool = False,
     ) -> Tuple[Optional[Dict[str, Any]], bool]:
-        """
-        Cập nhật tiến trình hiệu chuẩn.
-        - Settle phase (0.8s): Chờ mắt định vị vào điểm tròn.
-        - Collect phase (1.1s): Thu thập mẫu, bỏ qua frame chớp mắt.
-        """
         if not self.is_calibrating:
             return None, False
 
@@ -266,22 +182,22 @@ class GazeScreenMapper:
             self.is_calibrating = False
             return None, True
 
-        target_pt   = self.calib_points[self.calib_step]
+        target_pt = self.calib_points[self.calib_step]
         target_norm = self.norm_calib_points[self.calib_step]
 
         if elapsed < self.settle_time:
-            phase    = "settle"
+            phase = "settle"
             progress = min(1.0, elapsed / self.settle_time)
         else:
-            phase    = "collect"
+            phase = "collect"
             progress = min(1.0, (elapsed - self.settle_time) / self.collect_time)
             if not is_blinking and feature_vector is not None:
                 self.current_point_samples.append(list(feature_vector))
 
         if elapsed >= self.time_per_point:
             self._finalize_current_point(target_norm)
-            self.calib_step         += 1
-            self.calib_start_time   = time.time()
+            self.calib_step += 1
+            self.calib_start_time = time.time()
             self.current_point_samples = []
 
             if self.calib_step >= len(self.calib_points):
@@ -290,207 +206,199 @@ class GazeScreenMapper:
                 return None, True
 
         return {
-            "point":        target_pt,
-            "step":         self.calib_step,
-            "total_steps":  len(self.calib_points),
-            "phase":        phase,
-            "progress":     progress,
+            "point": target_pt,
+            "step": self.calib_step,
+            "total_steps": len(self.calib_points),
+            "phase": phase,
+            "progress": progress,
             "sample_count": len(self.current_point_samples),
-            "is_blinking":  is_blinking,
+            "is_blinking": is_blinking,
         }, False
 
     def _finalize_current_point(self, target_norm: Tuple[float, float]):
-<<<<<<< HEAD
-=======
-        """Lọc bỏ outlier bằng MAD (Median Absolute Deviation) và lưu mẫu sạch."""
->>>>>>> parent of b942f83 (update...)
+        """
+        Lọc mẫu ngoại lai bằng khoảng cách MAD trên 6 đặc trưng mắt chính.
+        Giữ lại các mẫu sạch tự nhiên và thêm trọng số cho tâm cụm (centroid) làm điểm neo.
+        """
         n_raw = len(self.current_point_samples)
         if n_raw < 3:
             print(f"[!] Điểm {self.calib_step + 1}: chỉ có {n_raw} mẫu — bỏ qua.")
             return
 
-<<<<<<< HEAD
         samples = np.array(self.current_point_samples, dtype=np.float64)
-        med = np.median(samples, axis=0)
-        dists = np.linalg.norm(samples - med, axis=1)
+        eye_feats = samples[:, :6]
+        median_eye = np.median(eye_feats, axis=0)
+        dists = np.linalg.norm(eye_feats - median_eye, axis=1)
         mad = max(np.median(dists), 1e-6)
 
-        threshold = max(1.6 * mad, np.percentile(dists, 65))
+        threshold = max(2.0 * mad, np.percentile(dists, 80))
         mask = dists <= threshold
         clean = samples[mask] if mask.sum() >= 3 else samples
 
-        centroid = 0.55 * np.median(clean, axis=0) + 0.45 * np.mean(clean, axis=0)
-        tx, ty = target_norm
-
-        self.X_centroids.append(centroid.tolist())
-        self.Y_centroids.append([tx, ty])
-
-        for s in clean:
-            stabilized = 0.65 * centroid + 0.35 * s
-            self.X_data.append(stabilized.tolist())
-            self.Y_data.append([tx, ty])
-
-        for _ in range(5):
-            self.X_data.append(centroid.tolist())
-            self.Y_data.append([tx, ty])
-
-        print(f"[+] Điểm {self.calib_step + 1}/{len(self.calib_points)}: "
-              f"{len(clean)}/{n_raw} mẫu sạch (rx={centroid[0]:.3f}, ry={centroid[1]:.3f}).")
-
-    def train_model(self):
-        if len(self.X_centroids) < 6:
-            print("[!] Không đủ dữ liệu huấn luyện.")
-=======
-        samples  = np.array(self.current_point_samples, dtype=np.float64)
-        median_s = np.median(samples, axis=0)
-        dists    = np.linalg.norm(samples - median_s, axis=1)
-        mad      = max(np.median(dists), 1e-6)
-        mask     = dists <= 2.5 * mad
-        clean    = samples[mask] if mask.sum() >= 3 else samples
+        # Tính tâm cụm sạch (trimmed mean + median) làm điểm neo
+        centroid = 0.5 * (np.median(clean, axis=0) + np.mean(clean, axis=0))
 
         tx, ty = target_norm
+        # Thêm các mẫu sạch tự nhiên để giữ phương sai học máy
         for s in clean:
             self.X_data.append(s.tolist())
             self.Y_data.append([tx, ty])
 
-        print(f"[+] Điểm {self.calib_step + 1}/{len(self.calib_points)}: "
-              f"{len(clean)}/{n_raw} mẫu sạch.")
+        # Thêm trọng số cho tâm cụm (3 lần)
+        for _ in range(3):
+            self.X_data.append(centroid.tolist())
+            self.Y_data.append([tx, ty])
 
-    # ------------------------------------------------------------------ #
-    # TRAINING                                                             #
-    # ------------------------------------------------------------------ #
+        print(f"[+] Điểm {self.calib_step + 1}/{len(self.calib_points)}: "
+              f"lọc {len(clean)}/{n_raw} mẫu sạch (rx={centroid[4]:.3f}, ry={centroid[5]:.3f}).")
 
     def train_model(self):
-        """Huấn luyện SVR-RBF trên tập mẫu 12 chiều."""
-        if len(self.X_data) < 20:
-            print("[!] Không đủ dữ liệu huấn luyện (cần ≥20 mẫu).")
->>>>>>> parent of b942f83 (update...)
+        """Huấn luyện mô hình Dual-Axis RidgeCV với alpha tối ưu riêng biệt cho X và Y."""
+        if len(self.X_data) < 15:
+            print("[!] Không đủ dữ liệu huấn luyện.")
             return
 
-        X_all = np.array(self.X_data, dtype=np.float64)
-        Y_all = np.array(self.Y_data, dtype=np.float64)
-        X_c = np.array(self.X_centroids, dtype=np.float64)
-        Y_c = np.array(self.Y_centroids, dtype=np.float64)
+        X = np.array(self.X_data, dtype=np.float64)
+        Y = np.array(self.Y_data, dtype=np.float64)
 
-<<<<<<< HEAD
-        print(f"\n[+] Huấn luyện Thin-Plate Spline (TPS) + SVR trên {len(X_c)} điểm neo...")
-=======
-        print(f"\n[+] Huấn luyện SVR-RBF trên {len(X)} mẫu (Vector 12 chiều)...")
->>>>>>> parent of b942f83 (update...)
+        print(f"\n[+] Huấn luyện Dual-Axis RidgeCV trên {len(X)} mẫu (Vector 19 chiều vật lý)...")
         t0 = time.time()
-        model = TPSSVREnsemble()
-        model.fit(X_all, Y_all, X_c, Y_c)
-        self.model = model
+
+        alphas_x = np.logspace(-3, 3, 35)
+        alphas_y = np.logspace(-2, 4, 35)
+
+        self.model_x = _build_axis_pipeline(alphas_x)
+        self.model_y = _build_axis_pipeline(alphas_y)
+
+        self.model_x.fit(X, Y[:, 0])
+        self.model_y.fit(X, Y[:, 1])
         dt = (time.time() - t0) * 1000
 
-<<<<<<< HEAD
-        pred_c = self.model.predict(X_c)
-        rmse = float(np.sqrt(np.mean(
-            (pred_c[:, 0] * self.screen_w - Y_c[:, 0] * self.screen_w) ** 2 +
-            (pred_c[:, 1] * self.screen_h - Y_c[:, 1] * self.screen_h) ** 2
-        )))
-        print(f"[+] Hoàn tất trong {dt:.1f}ms! Sai số RMSE tại các điểm hiệu chuẩn: {rmse:.1f}px")
+        pred_x = self.model_x.predict(X)
+        pred_y = self.model_y.predict(X)
+
+        rmse_x = float(np.sqrt(np.mean((pred_x * self.screen_w - Y[:, 0] * self.screen_w) ** 2)))
+        rmse_y = float(np.sqrt(np.mean((pred_y * self.screen_h - Y[:, 1] * self.screen_h) ** 2)))
+        rmse = float(np.sqrt(rmse_x**2 + rmse_y**2))
+
+        best_alpha_x = self.model_x.named_steps["ridge"].alpha_
+        best_alpha_y = self.model_y.named_steps["ridge"].alpha_
+        print(f"[+] Huấn luyện hoàn tất trong {dt:.1f}ms | Alpha X: {best_alpha_x:.3f}, Alpha Y: {best_alpha_y:.3f} | RMSE: {rmse:.1f}px (X:{rmse_x:.1f}px, Y:{rmse_y:.1f}px)")
+
+        self.offset_x = 0.0
+        self.offset_y = 0.0
 
         try:
-            joblib.dump({"version": MODEL_VERSION, "model": self.model}, self.model_path)
+            payload = {
+                "version": MODEL_VERSION,
+                "model_x": self.model_x,
+                "model_y": self.model_y,
+            }
+            joblib.dump(payload, self.model_path)
             print(f"[+] Đã lưu mô hình vào: {self.model_path}")
-=======
-        # Ước lượng sai số RMSE trên tập huấn luyện
-        pred = self.model.predict(X)
-        rmse = float(np.sqrt(np.mean(
-            (pred[:, 0] * self.screen_w  - Y[:, 0] * self.screen_w )**2 +
-            (pred[:, 1] * self.screen_h - Y[:, 1] * self.screen_h)**2
-        )))
-        print(f"[+] Huấn luyện thành công trong {dt:.0f}ms! RMSE tập mẫu: {rmse:.1f}px")
-
-        try:
-            joblib.dump(self.model, self.model_path)
-            print(f"[+] Đã lưu trọng số mô hình vào: {self.model_path}")
->>>>>>> parent of b942f83 (update...)
         except Exception as e:
             print(f"[!] Lưu model thất bại: {e}")
 
-    # ------------------------------------------------------------------ #
-    # LOAD / SAVE                                                          #
-    # ------------------------------------------------------------------ #
-
     def load_model(self):
-<<<<<<< HEAD
-=======
-        """Tải mô hình từ đĩa và kiểm tra số chiều tương thích."""
->>>>>>> parent of b942f83 (update...)
+        """Tải mô hình từ đĩa và kiểm tra phiên bản tương thích."""
         if not os.path.exists(self.model_path):
             return
         try:
             loaded = joblib.load(self.model_path)
-            step_names = {name for name, _ in loaded.steps}
-            if "svr" in step_names:
-                # Kiểm tra số chiều feature đầu vào của model đã lưu
-                scaler = loaded.named_steps.get("scaler")
-                if scaler is not None and hasattr(scaler, "n_features_in_"):
-                    if scaler.n_features_in_ != FEATURE_DIM:
-                        print(f"[!] Model cũ có {scaler.n_features_in_} features (yêu cầu {FEATURE_DIM}D).")
-                        print("[*] Hãy nhấn phím 'C' trên cửa sổ camera để hiệu chuẩn lại với 12D.")
-                        self.model = None
-                        return
-
-                self.model = loaded
-                print(f"[+] Đã tải mô hình SVR 12D từ: {self.model_path}")
+            if isinstance(loaded, dict) and loaded.get("version") == MODEL_VERSION:
+                self.model_x = loaded["model_x"]
+                self.model_y = loaded["model_y"]
+                print(f"[+] Đã tải mô hình {MODEL_VERSION} từ: {self.model_path}")
             else:
-<<<<<<< HEAD
-                print("[!] Phát hiện model phiên bản cũ — hãy nhấn phím 'C' để hiệu chuẩn lại.")
-=======
-                print("[!] Model cũ không tương thích — hãy nhấn phím 'C' để hiệu chuẩn lại.")
->>>>>>> parent of b942f83 (update...)
-                self.model = None
+                old_ver = loaded.get("version") if isinstance(loaded, dict) else "unknown"
+                print(f"[!] Phát hiện file model phiên bản cũ ({old_ver}).")
+                print("[*] Hãy nhấn phím 'C' để hiệu chuẩn lại với thuật toán Dual-Axis v3.0.")
+                self.model_x = None
+                self.model_y = None
         except Exception as e:
             print(f"[!] Lỗi khi tải model: {e}")
-            self.model = None
+            self.model_x = None
+            self.model_y = None
 
-    # ------------------------------------------------------------------ #
-    # PREDICT                                                              #
-    # ------------------------------------------------------------------ #
+    def apply_recenter(
+        self,
+        pred_raw_x: Optional[float] = None,
+        pred_raw_y: Optional[float] = None,
+    ) -> Tuple[float, float]:
+        """
+        Bù lệch nhanh: Giả định mắt đang nhìn vào tâm màn hình (screen_w / 2, screen_h / 2).
+        Tính delta offset = target - pred_raw và áp dụng làm mượt hệ số.
+        """
+        target_x = self.screen_w / 2.0
+        target_y = self.screen_h / 2.0
+
+        curr_x = pred_raw_x if pred_raw_x is not None else self.last_raw_x
+        curr_y = pred_raw_y if pred_raw_y is not None else self.last_raw_y
+
+        if curr_x is None or curr_y is None:
+            return self.offset_x, self.offset_y
+
+        diff_x = target_x - curr_x
+        diff_y = target_y - curr_y
+
+        self.offset_x = float(self.offset_x * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_x * RECENTER_SMOOTH_FACTOR)
+        self.offset_y = float(self.offset_y * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_y * RECENTER_SMOOTH_FACTOR)
+
+        print(f"[+] Re-center thành công! Offset mới: dx={self.offset_x:+.1f}px, dy={self.offset_y:+.1f}px")
+        return self.offset_x, self.offset_y
+
+    def reset_offset(self):
+        """Đặt lại offset bù trôi về 0."""
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        print("[*] Đã reset offset về (0, 0)")
 
     def predict(
         self,
         feature_vector: List[float],
         timestamp: Optional[float] = None,
     ) -> Optional[Tuple[int, int]]:
-<<<<<<< HEAD
-=======
-        """
-        Dự đoán tọa độ pixel màn hình (Sx, Sy) từ Rich Feature Vector 12 chiều.
-        Áp dụng One Euro Filter để triệt tiêu rung giật khi dừng nhìn và không trễ khi liếc nhanh.
-        """
->>>>>>> parent of b942f83 (update...)
-        if self.model is None or feature_vector is None:
+        """Dự đoán tọa độ màn hình (Sx, Sy), bù trôi, lọc 1€ Filter và áp dụng dead-zone vi mô."""
+        if self.model_x is None or self.model_y is None or feature_vector is None:
             return None
 
         t = timestamp if timestamp is not None else time.time()
+        feat_arr = np.array([feature_vector], dtype=np.float64)
+        pred_norm_x = float(self.model_x.predict(feat_arr)[0])
+        pred_norm_y = float(self.model_y.predict(feat_arr)[0])
 
-<<<<<<< HEAD
-        # Lọc trung vị 3 frame liên tiếp trên đặc trưng mắt để cắt các gai nhiễu đột biến
-        self.raw_history.append(feature_vector)
-        if len(self.raw_history) >= 3:
-            clean_feat = np.median(np.array(self.raw_history, dtype=np.float64), axis=0)
+        raw_x = pred_norm_x * self.screen_w
+        raw_y = pred_norm_y * self.screen_h
+        self.last_raw_x = raw_x
+        self.last_raw_y = raw_y
+
+        # Áp dụng offset bù trôi
+        adjusted_x = raw_x + self.offset_x
+        adjusted_y = raw_y + self.offset_y
+
+        norm_adj_x = adjusted_x / self.screen_w
+        norm_adj_y = adjusted_y / self.screen_h
+
+        smooth_norm_x = self.filter_x.filter(norm_adj_x, t)
+        smooth_norm_y = self.filter_y.filter(norm_adj_y, t)
+
+        target_sx = smooth_norm_x * self.screen_w
+        target_sy = smooth_norm_y * self.screen_h
+
+        # Vùng chết vi mô (Dead-zone) chống rung vi nhãn cầu khi nhìn cố định
+        if self.last_smooth_x is not None and self.last_smooth_y is not None:
+            dist_shift = math.hypot(target_sx - self.last_smooth_x, target_sy - self.last_smooth_y)
+            if dist_shift < DEAD_ZONE_RADIUS:
+                target_sx = self.last_smooth_x
+                target_sy = self.last_smooth_y
+            else:
+                self.last_smooth_x = target_sx
+                self.last_smooth_y = target_sy
         else:
-            clean_feat = np.array(feature_vector, dtype=np.float64)
+            self.last_smooth_x = target_sx
+            self.last_smooth_y = target_sy
 
-        pred_norm = self.model.predict(clean_feat.reshape(1, -1))[0]
+        sx = int(np.clip(target_sx, 0, self.screen_w - 1))
+        sy = int(np.clip(target_sy, 0, self.screen_h - 1))
 
-        # Chuyển sang đơn vị PIXEL trước khi đưa vào OneEuroFilter (Sửa lỗi trễ của Bản 1)
-        raw_x = float(pred_norm[0] * self.screen_w)
-        raw_y = float(pred_norm[1] * self.screen_h)
-
-        filt_x = self.filter_x.filter(raw_x, t)
-        filt_y = self.filter_y.filter(raw_y, t)
-
-        sx = int(np.clip(filt_x, 0, self.screen_w - 1))
-        sy = int(np.clip(filt_y, 0, self.screen_h - 1))
         return sx, sy
-=======
-        raw_x = float(np.clip(pred_norm[0] * self.screen_w, 0, self.screen_w  - 1))
-        raw_y = float(np.clip(pred_norm[1] * self.screen_h, 0, self.screen_h - 1))
-
-        return int(self.filter_x.filter(raw_x, t)), int(self.filter_y.filter(raw_y, t))
->>>>>>> parent of b942f83 (update...)
