@@ -38,7 +38,7 @@
 - Consumes: `feature_vector` (12D: `[rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg, ear_avg, head_x, head_y, pitch_norm, yaw_norm, roll_norm]`)
 - Produces: `expand_features(X: np.ndarray) -> np.ndarray` (kích thước ~19 chiều có ý nghĩa vật lý)
 
-- [ ] **Step 1: Viết test kiểm tra hàm `expand_features`**
+- [x] **Step 1: Viết test kiểm tra hàm `expand_features`**
 
 ```python
 # tests/test_mapper.py
@@ -54,12 +54,12 @@ class TestMapperFeatures(unittest.TestCase):
         self.assertEqual(X_exp.shape[1], 19)
 ```
 
-- [ ] **Step 2: Chạy test để xác nhận test thất bại**
+- [x] **Step 2: Chạy test để xác nhận test thất bại**
 
 Run: `.venv\Scripts\python.exe -m unittest tests/test_mapper.py`
 Expected: FAIL (ImportError hoặc expand_features chưa tồn tại).
 
-- [ ] **Step 3: Triển khai hàm `expand_features(X: np.ndarray) -> np.ndarray` trong `modules/mapper.py`**
+- [x] **Step 3: Triển khai hàm `expand_features(X: np.ndarray) -> np.ndarray` trong `modules/mapper.py`**
 
 Trích xuất:
 - Mắt cơ bản: `rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg` (6)
@@ -69,7 +69,7 @@ Trích xuất:
 - Tương tác mắt-đầu (Head-Eye interactions): `rx_avg * yaw_norm`, `ry_avg * pitch_norm`, `rx_avg * pitch_norm` (3)
 Tổng: 19 đặc trưng không đa cộng tuyến.
 
-- [ ] **Step 4: Chạy lại test để xác nhận test vượt qua**
+- [x] **Step 4: Chạy lại test để xác nhận test vượt qua**
 
 Run: `.venv\Scripts\python.exe -m unittest tests/test_mapper.py`
 Expected: PASS.
@@ -86,7 +86,7 @@ Expected: PASS.
 - Consumes: `X_data`, `Y_data`, `sample_weights`
 - Produces: `self.model_x: Pipeline`, `self.model_y: Pipeline`, `train_model()`, `predict()`
 
-- [ ] **Step 1: Viết test cho Dual-Axis training và prediction**
+- [x] **Step 1: Viết test cho Dual-Axis training và prediction**
 
 ```python
 # Thêm vào tests/test_mapper.py
@@ -107,12 +107,12 @@ def test_dual_axis_train_and_predict(self):
     self.assertTrue(0 <= pred[1] < 1080)
 ```
 
-- [ ] **Step 2: Chạy test để xác nhận test thất bại**
+- [x] **Step 2: Chạy test để xác nhận test thất bại**
 
 Run: `.venv\Scripts\python.exe -m unittest tests/test_mapper.py`
 Expected: FAIL (chưa có model_x/model_y).
 
-- [ ] **Step 3: Triển khai Dual-Axis Ridge Pipelines và cập nhật `_finalize_current_point`**
+- [x] **Step 3: Triển khai Dual-Axis Ridge Pipelines và cập nhật `_finalize_current_point`**
 
 Trong `modules/mapper.py`:
 - `_build_axis_pipeline(alphas)`: `Pipeline([("scaler", RobustScaler()), ("ridge", RidgeCV(alphas=alphas, scoring="neg_mean_squared_error"))])`
@@ -121,7 +121,7 @@ Trong `modules/mapper.py`:
 - Trong `_finalize_current_point`: Không nén toàn bộ về `0.65*centroid + 0.35*s`. Lưu các mẫu sạch thực tế `s` và thêm `sample_weights` (hoặc nhân bản nhẹ centroid 3 lần làm điểm neo).
 - Cập nhật `MODEL_VERSION = "dual_poly_ridge_v3.0"`.
 
-- [ ] **Step 4: Chạy test để xác nhận test vượt qua**
+- [x] **Step 4: Chạy test để xác nhận test vượt qua**
 
 Run: `.venv\Scripts\python.exe -m unittest tests/test_mapper.py`
 Expected: PASS.
@@ -139,7 +139,7 @@ Expected: PASS.
 - Consumes: `DEAD_ZONE_PIXELS`, phím bấm từ người dùng
 - Produces: `recenter(feature_vector)`, `reset_offset()`, `offset_x`, `offset_y`
 
-- [ ] **Step 1: Viết test kiểm tra tính năng Re-center và Dead-zone**
+- [x] **Step 1: Viết test kiểm tra tính năng Re-center và Dead-zone**
 
 ```python
 # Thêm vào tests/test_mapper.py
@@ -152,12 +152,12 @@ def test_recenter_offset(self):
     self.assertEqual(mapper.offset_y, 40)
 ```
 
-- [ ] **Step 2: Chạy test để xác nhận test thất bại**
+- [x] **Step 2: Chạy test để xác nhận test thất bại**
 
 Run: `.venv\Scripts\python.exe -m unittest tests/test_mapper.py`
 Expected: FAIL.
 
-- [ ] **Step 3: Triển khai Re-center và Dead-zone trong `modules/mapper.py` và `modules/config.py`**
+- [x] **Step 3: Triển khai Re-center và Dead-zone trong `modules/mapper.py` và `modules/config.py`**
 
 - Thêm cấu hình trong `config.py`: `DEAD_ZONE_RADIUS = 6` (pixels), `RECENTER_SMOOTH_FACTOR = 0.5`.
 - Trong `GazeScreenMapper`:
@@ -165,7 +165,7 @@ Expected: FAIL.
   - Hàm `recenter()`: tính sai lệch giữa vị trí dự đoán hiện tại và tâm màn hình `(screen_w / 2, screen_h / 2)` và cập nhật `offset_x, offset_y`.
   - Trong `predict()`: cộng offset `(offset_x, offset_y)` trước khi clip vào màn hình. Áp dụng dead-zone nếu độ dời giữa 2 frame liên tiếp < `DEAD_ZONE_RADIUS`.
 
-- [ ] **Step 4: Chạy test để xác nhận test vượt qua**
+- [x] **Step 4: Chạy test để xác nhận test vượt qua**
 
 Run: `.venv\Scripts\python.exe -m unittest tests/test_mapper.py`
 Expected: PASS.
@@ -182,16 +182,16 @@ Expected: PASS.
 - Consumes: Phím `R`/`r` trong vòng lặp `cv2.waitKey`
 - Produces: Cập nhật HUD hiển thị trạng thái Re-center và hướng dẫn phím bấm `[R] Can giua`
 
-- [ ] **Step 1: Thêm xử lý phím `R` / `r` trong `modules/tracker.py`**
+- [x] **Step 1: Thêm xử lý phím `R` / `r` trong `modules/tracker.py`**
   - Khi nhấn `r` hoặc `R`: gọi `self.mapper.recenter_current()` hoặc cập nhật offset từ điểm nhìn hiện tại.
   - In thông báo: `[+] Đã cân giữa màn hình (Offset: dx, dy)`.
   - Nhấn `Shift + R` hoặc phím giữ để reset offset về 0.
 
-- [ ] **Step 2: Cập nhật `draw_hud` và `render_screen_canvas` trong `modules/visualizer.py`**
+- [x] **Step 2: Cập nhật `draw_hud` và `render_screen_canvas` trong `modules/visualizer.py`**
   - Hiển thị thông số Offset `(dx, dy)` trên HUD nếu có bù trôi.
   - Hiển thị hướng dẫn: `[C] Hieu chuan | [R] Can giua | [M] Chuot | [Q] Thoat`.
 
-- [ ] **Step 3: Kiểm tra chạy thử syntax và logic qua script kiểm thử**
+- [x] **Step 3: Kiểm tra chạy thử syntax và logic qua script kiểm thử**
 
 Run: `.venv\Scripts\python.exe -c "import modules.tracker, modules.visualizer, modules.mapper; print('All modules imported successfully!')"`
 Expected: PASS.
@@ -204,10 +204,10 @@ Expected: PASS.
 - Modify: `tests/test_mapper.py`
 - Test: chạy toàn bộ `unittest`
 
-- [ ] **Step 1: Chạy toàn bộ test suite**
+- [x] **Step 1: Chạy toàn bộ test suite**
 
 Run: `.venv\Scripts\python.exe -m unittest discover tests`
 Expected: Tất cả các test đều PASS.
 
-- [ ] **Step 2: Dọn dẹp các file tạm test**
+- [x] **Step 2: Dọn dẹp các file tạm test**
   - Xóa `test_gaze_model.pkl` nếu có sinh ra trong quá trình test.

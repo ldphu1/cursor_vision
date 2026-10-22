@@ -114,7 +114,7 @@ class GazeScreenMapper:
         self.last_smooth_y: Optional[float] = None
 
         mx, my = CALIB_MARGIN_X, CALIB_MARGIN_Y
-        self.norm_calib_points: List[Tuple[float, float]] = [
+        self.norm_calib_points: List[Tuple[float, float]] = [\
             (0.5,       0.5      ),  # 1. Tâm màn hình
             (mx,        my       ),  # 2. Góc trên trái
             (0.5,       my       ),  # 3. Giữa trên
@@ -125,7 +125,7 @@ class GazeScreenMapper:
             (mx,        1.0 - my ),  # 8. Góc dưới trái
             (mx,        0.5      ),  # 9. Giữa trái
         ]
-        self.calib_points: List[Tuple[int, int]] = [
+        self.calib_points: List[Tuple[int, int]] = [\
             (int(px * screen_w), int(py * screen_h))
             for px, py in self.norm_calib_points
         ]
@@ -320,14 +320,32 @@ class GazeScreenMapper:
             self.model_x = None
             self.model_y = None
 
+    def recenter(
+        self,
+        feature_vector: Optional[List[float]] = None,
+        smooth: bool = False,
+    ) -> Tuple[float, float]:
+        """
+        Bù trôi nhanh từ feature_vector hoặc vị trí thô gần nhất.
+        """
+        if feature_vector is not None and self.model_x is not None and self.model_y is not None:
+            feat_arr = np.array([feature_vector], dtype=np.float64)
+            pred_norm_x = float(self.model_x.predict(feat_arr)[0])
+            pred_norm_y = float(self.model_y.predict(feat_arr)[0])
+            raw_x = pred_norm_x * self.screen_w
+            raw_y = pred_norm_y * self.screen_h
+            return self.apply_recenter(pred_raw_x=raw_x, pred_raw_y=raw_y, smooth=smooth)
+        return self.apply_recenter(smooth=smooth)
+
     def apply_recenter(
         self,
         pred_raw_x: Optional[float] = None,
         pred_raw_y: Optional[float] = None,
+        smooth: bool = False,
     ) -> Tuple[float, float]:
         """
         Bù lệch nhanh: Giả định mắt đang nhìn vào tâm màn hình (screen_w / 2, screen_h / 2).
-        Tính delta offset = target - pred_raw và áp dụng làm mượt hệ số.
+        Tính delta offset = target - pred_raw.
         """
         target_x = self.screen_w / 2.0
         target_y = self.screen_h / 2.0
@@ -341,8 +359,12 @@ class GazeScreenMapper:
         diff_x = target_x - curr_x
         diff_y = target_y - curr_y
 
-        self.offset_x = float(self.offset_x * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_x * RECENTER_SMOOTH_FACTOR)
-        self.offset_y = float(self.offset_y * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_y * RECENTER_SMOOTH_FACTOR)
+        if smooth:
+            self.offset_x = float(self.offset_x * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_x * RECENTER_SMOOTH_FACTOR)
+            self.offset_y = float(self.offset_y * (1.0 - RECENTER_SMOOTH_FACTOR) + diff_y * RECENTER_SMOOTH_FACTOR)
+        else:
+            self.offset_x = float(diff_x)
+            self.offset_y = float(diff_y)
 
         print(f"[+] Re-center thành công! Offset mới: dx={self.offset_x:+.1f}px, dy={self.offset_y:+.1f}px")
         return self.offset_x, self.offset_y
