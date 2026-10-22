@@ -3,22 +3,18 @@ from typing import Tuple, Optional
 import cv2
 import numpy as np
 
-
 class OneEuroFilter:
-<<<<<<< HEAD
     """Bộ lọc 1€ Filter hoạt động trên không gian tọa độ Pixel màn hình."""
 
     def __init__(self, min_cutoff: float = 0.45, beta: float = 0.005, d_cutoff: float = 1.0):
-=======
-    """
-    Bộ lọc 1€ Filter (One Euro Filter) - Casiez et al., CHI 2012.
-    Tự động điều chỉnh tần số cắt dựa trên vận tốc:
-    - Vận tốc thấp (mắt đứng yên / fixation): Giảm jitter, con trỏ cực kỳ ổn định.
-    - Vận tốc cao (mắt liếc nhanh / saccade): Loại bỏ hoàn toàn độ trễ (latency).
-    """
+        """
+        Bộ lọc 1€ Filter (One Euro Filter) - Casiez et al., CHI 2012.
+        Tự động điều chỉnh tần số cắt dựa trên vận tốc:
+        - Vận tốc thấp (mắt đứng yên / fixation): Giảm jitter, con trỏ cực kỳ ổn định.
+        - Vận tốc cao (mắt liếc nhanh / saccade): Loại bỏ hoàn toàn độ trễ (latency).
+        """
 
     def __init__(self, min_cutoff: float = 0.8, beta: float = 0.02, d_cutoff: float = 1.0):
->>>>>>> parent of b942f83 (update...)
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.d_cutoff = d_cutoff
@@ -82,7 +78,6 @@ def compute_eye_metrics(
         - rx: tỷ lệ ngang [0: trái, 0.5: giữa, 1: phải]
         - ry: tỷ lệ dọc [-: nhìn lên, 0: giữa, +: nhìn xuống]
         - ear: Eye Aspect Ratio (độ mở của mắt)
->>>>>>> parent of b942f83 (update...)
     """
     p_l = np.array(p_left_bound, dtype=np.float64)
     p_r = np.array(p_right_bound, dtype=np.float64)
@@ -90,25 +85,19 @@ def compute_eye_metrics(
     p_b = np.array(p_bot, dtype=np.float64)
     p_i = np.array(p_iris, dtype=np.float64)
 
-<<<<<<< HEAD
-=======
     # Trục ngang u hướng từ trái sang phải trên ảnh (Screen-Right)
->>>>>>> parent of b942f83 (update...)
     u = p_r - p_l
     L = float(np.linalg.norm(u))
     if L < 1e-6:
         return 0.5, 0.0, 0.25, np.array([1.0, 0.0]), np.array([0.0, 1.0]), 1.0, 1.0
 
     ex = u / L
-<<<<<<< HEAD
-=======
-    # Trục dọc ey vuông góc hướng xuống dưới trên ảnh (Screen-Down)
->>>>>>> parent of b942f83 (update...)
+
+# Trục dọc ey vuông góc hướng xuống dưới trên ảnh (Screen-Down)
     ey = np.array([-ex[1], ex[0]], dtype=np.float64)
     if ey[1] < 0:
         ey = -ey
 
-<<<<<<< HEAD
     v = p_i - p_l
     rx = float(np.dot(v, ex) / L)
 
@@ -122,13 +111,11 @@ def compute_eye_metrics(
     # Công thức kết hợp đã kiểm chứng độ nhạy tốt ở Bản 1
     ry = float(0.72 * ry_iris_corner + 0.28 * ry_lid_corner)
 
-=======
     # Vector từ mốc trái đến tâm mống mắt
     v = p_i - p_l
     rx = float(np.dot(v, ex) / L)
 
     # Độ mở mắt H và tỷ lệ dọc theo mí mắt
->>>>>>> parent of b942f83 (update...)
     H = float(np.linalg.norm(p_b - p_t))
     ymid = (p_t[1] + p_b[1]) / 2.0
     ry_lid = float((p_i[1] - ymid) / max(H, 1.0))
@@ -165,13 +152,10 @@ def compute_normalized_eye_coords(p_outer, p_inner, p_iris):
 
 
 def get_head_pose_from_matrix(transform_matrix: np.ndarray):
-<<<<<<< HEAD
     """Trích xuất góc Pitch, Yaw, Roll liên tục bằng atan2."""
     rmat = transform_matrix[:3, :3]
-=======
     """
     Trích xuất góc Pitch, Yaw, Roll từ ma trận xoay 4x4 của MediaPipe Face Landmarker.
->>>>>>> parent of b942f83 (update...)
 
     Trả về:
         (pitch, yaw, roll, rotation_matrix, direction_text)
