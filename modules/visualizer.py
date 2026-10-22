@@ -5,12 +5,12 @@ import numpy as np
 from .config import (
     RIGHT_EYE_OUTER_IDX,
     RIGHT_EYE_INNER_IDX,
-    RIGHT_IRIS_CENTER_IDX,
+    RIGHT_IRIS_INDICES,
     RIGHT_EYE_TOP_IDX,
     RIGHT_EYE_BOTTOM_IDX,
     LEFT_EYE_INNER_IDX,
     LEFT_EYE_OUTER_IDX,
-    LEFT_IRIS_CENTER_IDX,
+    LEFT_IRIS_INDICES,
     LEFT_EYE_TOP_IDX,
     LEFT_EYE_BOTTOM_IDX,
     NOSE_TIP_IDX,
@@ -27,29 +27,8 @@ def draw_visuals(
     draw_bbox: bool = True
 ) -> Tuple[np.ndarray, Optional[List[float]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
     """
-<<<<<<< HEAD
-    Trích xuất Feature Vector 6 chiều thuần túy của 2 mống mắt:
-        [rx_avg, ry_avg, rx_l, ry_l, rx_r, ry_r]
-    - Không đưa ear_avg và góc đầu vào mô hình để triệt tiêu hiện tượng trôi tọa độ
-      khi người dùng nheo mắt tập trung nhìn vào 1 điểm.
-=======
-    Vẽ hốc mắt, mống mắt, hướng đầu 3D và trích xuất Rich Feature Vector 12 chiều:
-        1.  rx_l:      tỷ lệ ngang mắt trái (Screen-Right, 0=trái, 1=phải)
-        2.  ry_l:      tỷ lệ dọc mắt trái (Screen-Down, <0=nhìn lên, >0=nhìn xuống)
-        3.  rx_r:      tỷ lệ ngang mắt phải (Screen-Right)
-        4.  ry_r:      tỷ lệ dọc mắt phải (Screen-Down)
-        5.  rx_avg:    trung bình ngang 2 mắt (triệt tiêu 50% vi rung giật cảm biến)
-        6.  ry_avg:    trung bình dọc 2 mắt (tăng độ ổn định trục Y)
-        7.  vergence:  độ hội tụ mắt = rx_l - rx_r (xác định cự ly & góc nhìn xiên)
-        8.  ear_avg:   độ mở mắt trung bình (tín hiệu nhìn lên/xuống cực mạnh)
-        9.  cross:     rx_avg * ry_avg (nội suy phi tuyến cho 4 góc chéo màn hình)
-        10. pitch_norm: góc ngửa/cúi đầu (pitch / 30.0)
-        11. yaw_norm:   góc quay đầu trái/phải (yaw / 30.0)
-        12. roll_norm:  góc nghiêng đầu (roll / 30.0)
-
-    Trả về:
-        (annotated_frame, feature_vector, eye_info, head_info, is_blinking)
->>>>>>> parent of b942f83 (update...)
+    Trích xuất Feature Vector 12 chiều ổn định cao:
+        [rx_l, ry_l, rx_r, ry_r, rx_avg, ry_avg, ear_avg, head_x, head_y, pitch_norm, yaw_norm, roll_norm]
     """
     h, w, _ = frame.shape
     annotated = frame.copy()
@@ -60,8 +39,7 @@ def draw_visuals(
     landmarks = detection_result.face_landmarks[0]
     transform_matrices = detection_result.facial_transformation_matrixes
 
-<<<<<<< HEAD
-    # Tâm mống mắt lấy trung bình 5 điểm mốc giúp giảm 50% nhiễu cảm biến
+    # Trung bình cộng 5 điểm mốc mống mắt trái & phải để triệt tiêu nhiễu landmark đơn lẻ
     p_l_iris = (
         float(np.mean([landmarks[i].x for i in LEFT_IRIS_INDICES]) * w),
         float(np.mean([landmarks[i].y for i in LEFT_IRIS_INDICES]) * h),
@@ -71,32 +49,18 @@ def draw_visuals(
         float(np.mean([landmarks[i].y for i in RIGHT_IRIS_INDICES]) * h),
     )
 
-    p_l_out = (landmarks[LEFT_EYE_OUTER_IDX].x  * w, landmarks[LEFT_EYE_OUTER_IDX].y  * h)
-    p_l_in  = (landmarks[LEFT_EYE_INNER_IDX].x  * w, landmarks[LEFT_EYE_INNER_IDX].y  * h)
-    p_l_top = (landmarks[LEFT_EYE_TOP_IDX].x    * w, landmarks[LEFT_EYE_TOP_IDX].y    * h)
+    # Tọa độ pixel các mốc mắt trái
+    p_l_out = (landmarks[LEFT_EYE_OUTER_IDX].x * w, landmarks[LEFT_EYE_OUTER_IDX].y * h)
+    p_l_in  = (landmarks[LEFT_EYE_INNER_IDX].x * w, landmarks[LEFT_EYE_INNER_IDX].y * h)
+    p_l_top = (landmarks[LEFT_EYE_TOP_IDX].x   * w, landmarks[LEFT_EYE_TOP_IDX].y   * h)
     p_l_bot = (landmarks[LEFT_EYE_BOTTOM_IDX].x * w, landmarks[LEFT_EYE_BOTTOM_IDX].y * h)
 
-    p_r_in  = (landmarks[RIGHT_EYE_INNER_IDX].x  * w, landmarks[RIGHT_EYE_INNER_IDX].y  * h)
-    p_r_out = (landmarks[RIGHT_EYE_OUTER_IDX].x  * w, landmarks[RIGHT_EYE_OUTER_IDX].y  * h)
-    p_r_top = (landmarks[RIGHT_EYE_TOP_IDX].x    * w, landmarks[RIGHT_EYE_TOP_IDX].y    * h)
+    # Tọa độ pixel các mốc mắt phải
+    p_r_in  = (landmarks[RIGHT_EYE_INNER_IDX].x * w, landmarks[RIGHT_EYE_INNER_IDX].y * h)
+    p_r_out = (landmarks[RIGHT_EYE_OUTER_IDX].x * w, landmarks[RIGHT_EYE_OUTER_IDX].y * h)
+    p_r_top = (landmarks[RIGHT_EYE_TOP_IDX].x   * w, landmarks[RIGHT_EYE_TOP_IDX].y   * h)
     p_r_bot = (landmarks[RIGHT_EYE_BOTTOM_IDX].x * w, landmarks[RIGHT_EYE_BOTTOM_IDX].y * h)
-=======
-    # Tọa độ pixel các mốc mắt trái (outer→inner = Screen-Right direction)
-    p_l_out  = (landmarks[LEFT_EYE_OUTER_IDX].x  * w, landmarks[LEFT_EYE_OUTER_IDX].y  * h)
-    p_l_in   = (landmarks[LEFT_EYE_INNER_IDX].x  * w, landmarks[LEFT_EYE_INNER_IDX].y  * h)
-    p_l_top  = (landmarks[LEFT_EYE_TOP_IDX].x    * w, landmarks[LEFT_EYE_TOP_IDX].y    * h)
-    p_l_bot  = (landmarks[LEFT_EYE_BOTTOM_IDX].x * w, landmarks[LEFT_EYE_BOTTOM_IDX].y * h)
-    p_l_iris = (landmarks[LEFT_IRIS_CENTER_IDX].x * w, landmarks[LEFT_IRIS_CENTER_IDX].y * h)
 
-    # Tọa độ pixel các mốc mắt phải (inner→outer = Screen-Right direction)
-    p_r_in   = (landmarks[RIGHT_EYE_INNER_IDX].x  * w, landmarks[RIGHT_EYE_INNER_IDX].y  * h)
-    p_r_out  = (landmarks[RIGHT_EYE_OUTER_IDX].x  * w, landmarks[RIGHT_EYE_OUTER_IDX].y  * h)
-    p_r_top  = (landmarks[RIGHT_EYE_TOP_IDX].x    * w, landmarks[RIGHT_EYE_TOP_IDX].y    * h)
-    p_r_bot  = (landmarks[RIGHT_EYE_BOTTOM_IDX].x * w, landmarks[RIGHT_EYE_BOTTOM_IDX].y * h)
-    p_r_iris = (landmarks[RIGHT_IRIS_CENTER_IDX].x * w, landmarks[RIGHT_IRIS_CENTER_IDX].y * h)
->>>>>>> parent of b942f83 (update...)
-
-    # Tính toán chuẩn hóa đối xứng thống nhất Screen-Right & Screen-Down
     rx_l, ry_l, ear_l, ex_l, ey_l, L_l, H_l = compute_eye_metrics(
         p_l_out, p_l_in, p_l_top, p_l_bot, p_l_iris
     )
@@ -106,43 +70,31 @@ def draw_visuals(
 
     is_blinking = (ear_l < BLINK_EAR_THRESHOLD or ear_r < BLINK_EAR_THRESHOLD)
 
-    # Head Pose 3D từ ma trận xoay
     pitch, yaw, roll = 0.0, 0.0, 0.0
     dir_txt = "Level"
     rmat = np.eye(3)
     if transform_matrices and len(transform_matrices) > 0:
         pitch, yaw, roll, rmat, dir_txt = get_head_pose_from_matrix(transform_matrices[0])
 
-<<<<<<< HEAD
+    # Tâm giữa 2 mắt chuẩn hóa [-0.5, 0.5] để bù sai số dịch chuyển đầu
+    eye_center_x = 0.25 * (p_l_out[0] + p_l_in[0] + p_r_in[0] + p_r_out[0]) / w - 0.5
+    eye_center_y = 0.25 * (p_l_out[1] + p_l_in[1] + p_r_in[1] + p_r_out[1]) / h - 0.5
+
     rx_avg  = float(0.5 * (rx_l + rx_r))
     ry_avg  = float(0.5 * (ry_l + ry_r))
     ear_avg = float(0.5 * (ear_l + ear_r))
-=======
-    # -------------------------------------------------------------
-    # XÂY DỰNG RICH FEATURE VECTOR 12 CHIỀU
-    # -------------------------------------------------------------
-    rx_avg   = float((rx_l + rx_r) / 2.0)
-    ry_avg   = float((ry_l + ry_r) / 2.0)
-    vergence = float(rx_l - rx_r)
-    ear_avg  = float((ear_l + ear_r) / 2.0)
-    cross    = float(rx_avg * ry_avg)
-    p_norm   = float(pitch / 30.0)
-    y_norm   = float(yaw / 30.0)
-    r_norm   = float(roll / 30.0)
->>>>>>> parent of b942f83 (update...)
+    p_norm  = float(pitch / 30.0)
+    y_norm  = float(yaw / 30.0)
+    r_norm  = float(roll / 30.0)
 
     feature_vector: List[float] = [
-        rx_avg, ry_avg,
         rx_l, ry_l,
         rx_r, ry_r,
-<<<<<<< HEAD
-=======
         rx_avg, ry_avg,
-        vergence,
         ear_avg,
-        cross,
+        float(eye_center_x),
+        float(eye_center_y),
         p_norm, y_norm, r_norm,
->>>>>>> parent of b942f83 (update...)
     ]
 
     eye_info: Dict[str, Any] = {
@@ -157,6 +109,7 @@ def draw_visuals(
         "pitch": pitch, "yaw": yaw, "roll": roll, "direction": dir_txt,
     }
 
+    # Vẽ viền hốc mắt và bounding box
     l_pts = np.array(
         [(int(landmarks[i].x * w), int(landmarks[i].y * h)) for i in LEFT_EYE_CONTOUR],
         dtype=np.int32,
@@ -182,7 +135,6 @@ def draw_visuals(
                 box_col, 1, cv2.LINE_AA,
             )
 
-    # Vẽ hệ trục và tâm mống mắt
     for (p_origin, p_iris, ex, ey, L) in [
         (p_l_out, p_l_iris, ex_l, ey_l, L_l),
         (p_r_in,  p_r_iris, ex_r, ey_r, L_r),
@@ -197,7 +149,6 @@ def draw_visuals(
         cv2.line(annotated, (ix-4, iy), (ix+4, iy), (0, 255, 255), 1, cv2.LINE_AA)
         cv2.line(annotated, (ix, iy-4), (ix, iy+4), (0, 255, 255), 1, cv2.LINE_AA)
 
-    # Vẽ mũi tên hướng đầu 3D
     npx = int(landmarks[NOSE_TIP_IDX].x * w)
     npy = int(landmarks[NOSE_TIP_IDX].y * h)
     al = int(min(w, h) * 0.16)
@@ -220,33 +171,25 @@ def draw_hud(
     has_model: bool,
     fps: float,
     mouse_enabled: bool = False,
+    offset: Optional[Tuple[float, float]] = None,
+    notify_msg: Optional[str] = None,
 ):
-    panel_w, panel_h = 390, 230
+    """Vẽ bảng thông tin trực quan HUD lên frame camera."""
+    panel_w, panel_h = 390, 242
 
     overlay = frame.copy()
     cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
     cv2.rectangle(frame, (10, 10), (10 + panel_w, 10 + panel_h), (80, 80, 80), 1)
 
-<<<<<<< HEAD
-    cv2.putText(frame, f"Gaze Tracker | FPS: {int(fps)}", (20, 32),
+    cv2.putText(frame, f"Gaze Tracker v3.0 | FPS: {int(fps)}", (20, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2, cv2.LINE_AA)
 
     if is_calibrating:
-        status_txt   = "DANG HIEU CHUAN 13 DIEM (TPS+SVR)..."
+        status_txt   = "DANG HIEU CHUAN 9 DIEM..."
         status_color = (0, 255, 255)
     elif has_model:
-        status_txt   = "DA KET NOI MAN HINH (TPS + SVR)"
-=======
-    cv2.putText(frame, f"Gaze Tracker v2.2 | FPS: {int(fps)}", (20, 32),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2, cv2.LINE_AA)
-
-    if is_calibrating:
-        status_txt   = "DANG HIEU CHUAN 9 DIEM (12D)..."
-        status_color = (0, 255, 255)
-    elif has_model:
-        status_txt   = "DA KET NOI MAN HINH (SVR-RBF 12D)"
->>>>>>> parent of b942f83 (update...)
+        status_txt   = "DA KET NOI (Dual-Ridge v3.0)"
         status_color = (0, 255, 0)
     else:
         status_txt   = "CHUA HIEU CHUAN  [C] de bat dau"
@@ -273,17 +216,22 @@ def draw_hud(
                     (20, 142), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (180, 180, 180), 1, cv2.LINE_AA)
 
     if gaze_pt:
-        cv2.putText(frame, f"Toa do man hinh: X={gaze_pt[0]}  Y={gaze_pt[1]}",
-                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1, cv2.LINE_AA)
+        off_str = f" [Off: {offset[0]:+.0f},{offset[1]:+.0f}]" if (offset and (abs(offset[0]) > 0.5 or abs(offset[1]) > 0.5)) else ""
+        cv2.putText(frame, f"Toa do man hinh: X={gaze_pt[0]}  Y={gaze_pt[1]}{off_str}",
+                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 255), 1, cv2.LINE_AA)
     else:
         cv2.putText(frame, "Toa do man hinh: --",
-                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (130, 130, 130), 1, cv2.LINE_AA)
+                    (20, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (130, 130, 130), 1, cv2.LINE_AA)
 
     mcol = (0, 255, 0) if mouse_enabled else (160, 160, 160)
     cv2.putText(frame, f"Chuot [M]: {'BAT' if mouse_enabled else 'TAT'}",
                 (20, 192), cv2.FONT_HERSHEY_SIMPLEX, 0.42, mcol, 1, cv2.LINE_AA)
-    cv2.putText(frame, "[C] Hieu chuan | [F] Fullscreen | [Q] Thoat",
-                (20, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1, cv2.LINE_AA)
+
+    if notify_msg:
+        cv2.putText(frame, notify_msg, (20, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 100), 1, cv2.LINE_AA)
+    else:
+        cv2.putText(frame, "[C] Hieu chuan | [R] Can giua | [M] Chuot | [Q] Thoat",
+                    (20, 214), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (200, 200, 200), 1, cv2.LINE_AA)
 
 
 def render_screen_canvas(
@@ -292,14 +240,21 @@ def render_screen_canvas(
     calib_info: Optional[Dict[str, Any]],
     gaze_screen_pt: Optional[Tuple[int, int]],
     has_model: bool,
+    notify_msg: Optional[str] = None,
 ) -> np.ndarray:
+    """Tạo màn hình mô phỏng (Screen Canvas): hiệu chuẩn 2 giai đoạn hoặc con trỏ ánh mắt."""
     canvas = np.zeros((screen_h, screen_w, 3), dtype=np.uint8)
 
-    # Lưới nhẹ
     for gx in range(0, screen_w, max(1, screen_w // 8)):
         cv2.line(canvas, (gx, 0), (gx, screen_h), (20, 20, 20), 1)
     for gy in range(0, screen_h, max(1, screen_h // 6)):
         cv2.line(canvas, (0, gy), (screen_w, gy), (20, 20, 20), 1)
+
+    if notify_msg:
+        cv2.rectangle(canvas, (screen_w // 2 - 250, 20), (screen_w // 2 + 250, 70), (40, 40, 40), -1)
+        cv2.rectangle(canvas, (screen_w // 2 - 250, 20), (screen_w // 2 + 250, 70), (0, 255, 120), 2)
+        cv2.putText(canvas, notify_msg, (screen_w // 2 - 230, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 120), 2, cv2.LINE_AA)
 
     if calib_info is not None:
         pt       = calib_info["point"]
@@ -308,54 +263,31 @@ def render_screen_canvas(
         phase    = calib_info["phase"]
         progress = calib_info["progress"]
         blinking = calib_info.get("is_blinking", False)
-<<<<<<< HEAD
-
-        # Hiển thị thông báo ở góc dưới màn hình để mắt không bị phân tâm khỏi tâm chấm đỏ
-        cv2.putText(
-            canvas,
-            f"Diem {step + 1}/{total} - Hay tap trung nhin vao tam cham do",
-            (screen_w // 2 - 250, screen_h - 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 1, cv2.LINE_AA,
-        )
-=======
-        lx = max(10, pt[0] - 170)
-        ly = max(50, pt[1] - 55)
->>>>>>> parent of b942f83 (update...)
+        lx = max(10, min(screen_w - 340, pt[0] - 170))
+        ly = max(50, pt[1] - 55) if pt[1] > 100 else pt[1] + 65
 
         if phase == "settle":
-            r = max(8, int(38 * (1.0 - progress * 0.75)))
+            r = max(12, int(45 * (1.0 - progress * 0.65)))
             cv2.circle(canvas, pt, r, (0, 255, 255), 2, cv2.LINE_AA)
-<<<<<<< HEAD
-            cv2.circle(canvas, pt, 4, (0, 0, 255), -1, cv2.LINE_AA)
-        else:
-            col = (0, 0, 255) if blinking else (0, 255, 0)
-            cv2.circle(canvas, pt, 14, col, 2, cv2.LINE_AA)
-            cv2.ellipse(canvas, pt, (20, 20), 0, -90, -90 + int(progress * 360), col, 2, cv2.LINE_AA)
-            # Chấm tâm nhỏ 3px kèm chữ thập mảnh giúp mắt khóa tiêu cự chính xác vào 1 điểm
-            cv2.line(canvas, (pt[0] - 8, pt[1]), (pt[0] + 8, pt[1]), (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.line(canvas, (pt[0], pt[1] - 8), (pt[0], pt[1] + 8), (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.circle(canvas, pt, 3, (0, 0, 255), -1, cv2.LINE_AA)
-=======
             cv2.circle(canvas, pt, 5, (0, 255, 255), -1, cv2.LINE_AA)
-            cv2.putText(canvas, f"Diem {step+1}/{total}: Chuan bi...",
+            cv2.putText(canvas, f"Diem {step+1}/{total}: Nhin vao tam...",
                         (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 255, 255), 2, cv2.LINE_AA)
         else:
             col = (0, 0, 255) if blinking else (0, 255, 0)
-            msg = "CHOP MAT — Tam dung" if blinking else f"Dang ghi (diem {step+1}/{total})"
+            msg = "CHOP MAT — Tam dung" if blinking else f"Giu anh mat ({step+1}/{total})"
             cv2.circle(canvas, pt, 18, col, 2, cv2.LINE_AA)
             cv2.circle(canvas, pt, 6, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.ellipse(canvas, pt, (28, 28), 0, -90, -90 + int(progress * 360), col, 3, cv2.LINE_AA)
             cv2.putText(canvas, msg, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.72, col, 2, cv2.LINE_AA)
->>>>>>> parent of b942f83 (update...)
 
     elif gaze_screen_pt is not None:
         gx, gy = gaze_screen_pt
-        cv2.circle(canvas, (gx, gy), 20, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.circle(canvas, (gx, gy), 4, (0, 0, 255), -1, cv2.LINE_AA)
-        cv2.line(canvas, (gx-28, gy), (gx+28, gy), (0, 255, 255), 1, cv2.LINE_AA)
-        cv2.line(canvas, (gx, gy-28), (gx, gy+28), (0, 255, 255), 1, cv2.LINE_AA)
-        label_x = min(screen_w - 180, gx + 25)
-        label_y = min(screen_h - 20,  gy + 25)
+        cv2.circle(canvas, (gx, gy), 22, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.circle(canvas, (gx, gy), 5, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.line(canvas, (gx-32, gy), (gx+32, gy), (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.line(canvas, (gx, gy-32), (gx, gy+32), (0, 255, 255), 1, cv2.LINE_AA)
+        label_x = min(screen_w - 180, gx + 28)
+        label_y = min(screen_h - 20,  gy + 28)
         cv2.putText(canvas, f"({gx}, {gy})", (label_x, label_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 200), 2, cv2.LINE_AA)
 
@@ -363,7 +295,7 @@ def render_screen_canvas(
         cx, cy = screen_w // 2, screen_h // 2
         cv2.putText(canvas, "CHUA CO MO HINH HIEU CHUAN",
                     (cx - 280, cy - 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2, cv2.LINE_AA)
-        cv2.putText(canvas, "Nhan phim [C] de bat dau hieu chuan 13 diem (Fullscreen)",
-                    (cx - 380, cy + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (190, 190, 190), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "Nhan phim [C] de bat dau hieu chuan 9 diem (Dual-Axis v3.0)",
+                    (cx - 390, cy + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (190, 190, 190), 1, cv2.LINE_AA)
 
     return canvas
