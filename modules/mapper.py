@@ -114,7 +114,7 @@ class GazeScreenMapper:
         self.last_smooth_y: Optional[float] = None
 
         mx, my = CALIB_MARGIN_X, CALIB_MARGIN_Y
-        self.norm_calib_points: List[Tuple[float, float]] = [
+        self.norm_calib_points: List[Tuple[float, float]] = [\
             (0.5,       0.5      ),  # 1. Tâm màn hình
             (mx,        my       ),  # 2. Góc trên trái
             (0.5,       my       ),  # 3. Giữa trên
@@ -125,7 +125,7 @@ class GazeScreenMapper:
             (mx,        1.0 - my ),  # 8. Góc dưới trái
             (mx,        0.5      ),  # 9. Giữa trái
         ]
-        self.calib_points: List[Tuple[int, int]] = [
+        self.calib_points: List[Tuple[int, int]] = [\
             (int(px * screen_w), int(py * screen_h))
             for px, py in self.norm_calib_points
         ]

@@ -73,6 +73,7 @@ class TestMapperFeaturesAndModel(unittest.TestCase):
 
         # Gọi recenter bằng feature_vector
         mapper.recenter(feature_vector=X[0].tolist())
+        # Tọa độ target là tâm (960, 540), raw quanh 1920*0.4=768, 1080*0.4=432
         self.assertNotEqual(mapper.offset_x, 0.0)
         self.assertNotEqual(mapper.offset_y, 0.0)
 

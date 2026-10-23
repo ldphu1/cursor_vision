@@ -76,7 +76,7 @@ def draw_visuals(
     if transform_matrices and len(transform_matrices) > 0:
         pitch, yaw, roll, rmat, dir_txt = get_head_pose_from_matrix(transform_matrices[0])
 
-    # Tâm giữa 2 mắt chuẩn hóa [-0.5, 0.5] để bù sai số dịch chuyển đầu
+    # Tâm giữa 2 mắt chuẩn hóa [-0.5, 0.5] để bù sai số dịch chuyển đầu (Parallax compensation)
     eye_center_x = 0.25 * (p_l_out[0] + p_l_in[0] + p_r_in[0] + p_r_out[0]) / w - 0.5
     eye_center_y = 0.25 * (p_l_out[1] + p_l_in[1] + p_r_in[1] + p_r_out[1]) / h - 0.5
 

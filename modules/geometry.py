@@ -1,12 +1,12 @@
 import math
 from typing import Tuple, Optional
+import cv2
 import numpy as np
 
 
 class OneEuroFilter:
-    """Bộ lọc 1€ Filter (Casiez et al., CHI 2012)."""
-
-    def __init__(self, min_cutoff: float = 0.5, beta: float = 0.015, d_cutoff: float = 1.0):
+    """Bộ lọc 1€ Filter hoạt động trên không gian tọa độ Pixel màn hình."""
+    def __init__(self, min_cutoff: float = 0.8, beta: float = 0.02, d_cutoff: float = 1.0):
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.d_cutoff = d_cutoff
@@ -27,11 +27,13 @@ class OneEuroFilter:
         t_e = max(t - self.t_prev, 1e-5)
         self.t_prev = float(t)
 
+        # Ước lượng đạo hàm dx/dt với lọc thông thấp d_cutoff
         a_d = self._smoothing_factor(t_e, self.d_cutoff)
         dx = (x - self.x_prev) / t_e
         dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
         self.dx_prev = dx_hat
 
+        # Tần số cắt động tỷ lệ thuận với tốc độ di chuyển
         cutoff = self.min_cutoff + self.beta * abs(dx_hat)
         a = self._smoothing_factor(t_e, cutoff)
         x_hat = a * x + (1.0 - a) * self.x_prev
@@ -52,9 +54,20 @@ def compute_eye_metrics(
     p_iris,
 ) -> Tuple[float, float, float, np.ndarray, np.ndarray, float, float]:
     """
-    Chuẩn hóa tọa độ mống mắt dựa trên hệ quy chiếu cố định của 2 khóe mắt:
-    - Không chia cho H (độ mở mắt) để tránh nhiễu vọt khi nhìn xuống/nheo mắt.
-    - Đo độ dịch chuyển dọc của cả tâm mống mắt và tâm mí mắt so với đường cơ sở nối 2 khóe mắt.
+    Chuẩn hóa tọa độ mống mắt dựa trên đường cơ sở nối 2 khóe mắt (chiều dài L):
+    - Tránh hoàn toàn phép chia cho H (độ mở mắt) gây vọt giá trị khi tập trung nhìn.
+    Chuẩn hóa tọa độ mắt theo hướng thống nhất (Màn hình Phải & Màn hình Dưới):
+    - p_left_bound: điểm mốc phía bên trái trên ảnh (với mắt trái là khóe ngoài 263, mắt phải là khóe trong 133).
+    - p_right_bound: điểm mốc phía bên phải trên ảnh (với mắt trái là khóe trong 362, mắt phải là khóe ngoài 33).
+    - p_top: mí mắt trên.
+    - p_bot: mí mắt dưới.
+    - p_iris: tâm mống mắt.
+
+    Trả về:
+        (rx, ry, ear, ex, ey, L, H)
+        - rx: tỷ lệ ngang [0: trái, 0.5: giữa, 1: phải]
+        - ry: tỷ lệ dọc [-: nhìn lên, 0: giữa, +: nhìn xuống]
+        - ear: Eye Aspect Ratio (độ mở của mắt)
     """
     p_l = np.array(p_left_bound, dtype=np.float64)
     p_r = np.array(p_right_bound, dtype=np.float64)
@@ -62,42 +75,52 @@ def compute_eye_metrics(
     p_b = np.array(p_bot, dtype=np.float64)
     p_i = np.array(p_iris, dtype=np.float64)
 
-    # Vector trục ngang nối từ mốc khóe trái sang mốc khóe phải trên ảnh
+    # Trục ngang u hướng từ trái sang phải trên ảnh (Screen-Right)
     u = p_r - p_l
     L = float(np.linalg.norm(u))
     if L < 1e-6:
         return 0.5, 0.0, 0.25, np.array([1.0, 0.0]), np.array([0.0, 1.0]), 1.0, 1.0
 
     ex = u / L
-    # Trục dọc ey vuông góc với ex và luôn hướng xuống dưới (Screen-Down)
+    # Trục dọc ey vuông góc hướng xuống dưới trên ảnh (Screen-Down)
     ey = np.array([-ex[1], ex[0]], dtype=np.float64)
     if ey[1] < 0:
         ey = -ey
 
-    # Tỷ lệ ngang rx: [0.0 -> nhìn sang trái, 0.5 -> chính giữa, 1.0 -> nhìn sang phải]
     v = p_i - p_l
     rx = float(np.dot(v, ex) / L)
 
-    # Trung điểm 2 khóe mắt (bám vào xương hốc mắt, không bị trôi khi liếc lên/xuống)
+    # Trung điểm 2 khóe mắt làm gốc chiếu dọc ổn định
     p_corner_mid = 0.5 * (p_l + p_r)
     p_lid_mid = 0.5 * (p_t + p_b)
 
-    # Hình chiếu dọc của tâm mống mắt và tâm mí mắt so với tâm đường nối 2 khóe mắt
     ry_iris_corner = float(np.dot(p_i - p_corner_mid, ey) / L)
     ry_lid_corner = float(np.dot(p_lid_mid - p_corner_mid, ey) / L)
 
-    # Kết hợp dịch chuyển của nhãn cầu và sự cuốn theo tự nhiên của mí mắt (chuẩn hóa theo L)
-    ry = float(0.70 * ry_iris_corner + 0.30 * ry_lid_corner)
+    # Công thức kết hợp đã kiểm chứng độ nhạy tốt ở Bản 1
+    ry = float(0.72 * ry_iris_corner + 0.28 * ry_lid_corner)
 
-    # Độ mở mắt H và tỷ lệ EAR
+    # Vector từ mốc trái đến tâm mống mắt
+    v = p_i - p_l
+    rx = float(np.dot(v, ex) / L)
+
+    # Độ mở mắt H và tỷ lệ dọc theo mí mắt
     H = float(np.linalg.norm(p_b - p_t))
+    ymid = (p_t[1] + p_b[1]) / 2.0
+    ry_lid = float((p_i[1] - ymid) / max(H, 1.0))
+    ry_proj = float(np.dot(v, ey) / L)
+
+    # Kết hợp độ nhạy dọc từ cả mí mắt và hình chiếu
+    ry = float(0.75 * ry_lid + 0.25 * (ry_proj * 2.5))
+
+    # Tỷ lệ co/mở mắt EAR
     ear = float(H / max(L, 1e-4))
 
     return rx, ry, ear, ex, ey, L, H
 
 
 def compute_normalized_eye_coords(p_outer, p_inner, p_iris):
-    """Hàm tương thích ngược."""
+    """Hàm tương thích ngược với phiên bản cũ."""
     p_outer = np.array(p_outer, dtype=np.float64)
     p_inner = np.array(p_inner, dtype=np.float64)
     p_iris = np.array(p_iris, dtype=np.float64)
@@ -118,21 +141,17 @@ def compute_normalized_eye_coords(p_outer, p_inner, p_iris):
 
 
 def get_head_pose_from_matrix(transform_matrix: np.ndarray):
-    """
-    Trích xuất góc Pitch, Yaw, Roll liên tục từ ma trận xoay 4x4 của MediaPipe.
-    Sử dụng công thức atan2 trực tiếp thay vì RQDecomp3x3 để tránh nhảy góc +-180 độ.
-    """
+    """Trích xuất góc Pitch, Yaw, Roll liên tục bằng atan2."""
     rmat = transform_matrix[:3, :3]
+    """
+    Trích xuất góc Pitch, Yaw, Roll từ ma trận xoay 4x4 của MediaPipe Face Landmarker.
 
-    sy = math.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
-    if sy > 1e-6:
-        pitch = math.degrees(math.atan2(-rmat[1, 2], rmat[2, 2]))
-        yaw = math.degrees(math.atan2(rmat[0, 2], sy))
-        roll = math.degrees(math.atan2(-rmat[0, 1], rmat[0, 0]))
-    else:
-        pitch = math.degrees(math.atan2(rmat[2, 1], rmat[1, 1]))
-        yaw = math.degrees(math.atan2(rmat[0, 2], sy))
-        roll = 0.0
+    Trả về:
+        (pitch, yaw, roll, rotation_matrix, direction_text)
+    """
+    rotation_matrix = transform_matrix[:3, :3]
+    angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_matrix)
+    pitch, yaw, roll = float(angles[0]), float(angles[1]), float(angles[2])
 
     direction_h = "Right" if yaw > 10.0 else ("Left" if yaw < -10.0 else "Center")
     direction_v = "Up" if pitch > 10.0 else ("Down" if pitch < -10.0 else "Level")
@@ -146,4 +165,4 @@ def get_head_pose_from_matrix(transform_matrix: np.ndarray):
     else:
         direction_text = f"Looking {direction_v}-{direction_h}"
 
-    return float(pitch), float(yaw), float(roll), rmat, direction_text
+    return pitch, yaw, roll, rotation_matrix, direction_text
