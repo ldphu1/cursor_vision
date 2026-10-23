@@ -76,7 +76,7 @@ def draw_visuals(
     if transform_matrices and len(transform_matrices) > 0:
         pitch, yaw, roll, rmat, dir_txt = get_head_pose_from_matrix(transform_matrices[0])
 
-    # Tâm giữa 2 mắt chuẩn hóa [-0.5, 0.5] để bù sai số dịch chuyển đầu (Parallax compensation)
+    # Tâm giữa 2 mắt chuẩn hóa [-0.5, 0.5] để bù sai số dịch chuyển đầu
     eye_center_x = 0.25 * (p_l_out[0] + p_l_in[0] + p_r_in[0] + p_r_out[0]) / w - 0.5
     eye_center_y = 0.25 * (p_l_out[1] + p_l_in[1] + p_r_in[1] + p_r_out[1]) / h - 0.5
 
@@ -135,9 +135,9 @@ def draw_visuals(
                 box_col, 1, cv2.LINE_AA,
             )
 
-    for (p_origin, p_iris, ex, ey, L) in [
-        (p_l_out, p_l_iris, ex_l, ey_l, L_l),
-        (p_r_in,  p_r_iris, ex_r, ey_r, L_r),
+    for (p_origin, p_iris, ex, ey, L) in [\
+        (p_l_out, p_l_iris, ex_l, ey_l, L_l),\
+        (p_r_in,  p_r_iris, ex_r, ey_r, L_r),\
     ]:
         ox, oy = int(p_origin[0]), int(p_origin[1])
         al = int(L * 0.6)
@@ -182,14 +182,14 @@ def draw_hud(
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
     cv2.rectangle(frame, (10, 10), (10 + panel_w, 10 + panel_h), (80, 80, 80), 1)
 
-    cv2.putText(frame, f"Gaze Tracker v3.0 | FPS: {int(fps)}", (20, 32),
+    cv2.putText(frame, f"Gaze Tracker v3.2 | FPS: {int(fps)}", (20, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2, cv2.LINE_AA)
 
     if is_calibrating:
         status_txt   = "DANG HIEU CHUAN 9 DIEM..."
         status_color = (0, 255, 255)
     elif has_model:
-        status_txt   = "DA KET NOI (Dual-Ridge v3.0)"
+        status_txt   = "DA KET NOI (Dual-Ridge v3.2 Precision)"
         status_color = (0, 255, 0)
     else:
         status_txt   = "CHUA HIEU CHUAN  [C] de bat dau"
@@ -295,7 +295,7 @@ def render_screen_canvas(
         cx, cy = screen_w // 2, screen_h // 2
         cv2.putText(canvas, "CHUA CO MO HINH HIEU CHUAN",
                     (cx - 280, cy - 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2, cv2.LINE_AA)
-        cv2.putText(canvas, "Nhan phim [C] de bat dau hieu chuan 9 diem (Dual-Axis v3.0)",
+        cv2.putText(canvas, "Nhan phim [C] de bat dau hieu chuan 9 diem (Dual-Axis v3.2)",
                     (cx - 390, cy + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (190, 190, 190), 1, cv2.LINE_AA)
 
     return canvas

@@ -2,7 +2,8 @@ import os
 import unittest
 import numpy as np
 
-from modules.mapper import expand_features, GazeScreenMapper
+from modules.mapper import expand_features, GazeScreenMapper, EXPANDED_FEATURE_DIM
+from modules.config import DEAD_ZONE_RADIUS
 
 
 class TestMapperFeaturesAndModel(unittest.TestCase):
@@ -10,12 +11,13 @@ class TestMapperFeaturesAndModel(unittest.TestCase):
         X_raw = np.random.randn(10, 12)
         X_exp = expand_features(X_raw)
         self.assertEqual(X_exp.shape[0], 10)
-        self.assertEqual(X_exp.shape[1], 19)
+        self.assertEqual(X_exp.shape[1], EXPANDED_FEATURE_DIM)
+        self.assertEqual(EXPANDED_FEATURE_DIM, 12)
 
     def test_expand_features_1d(self):
         vec_12 = np.random.randn(12)
-        vec_19 = expand_features(vec_12)
-        self.assertEqual(vec_19.shape[0], 19)
+        vec_exp = expand_features(vec_12)
+        self.assertEqual(vec_exp.shape[0], 12)
 
     def test_predict_none_when_uncalibrated(self):
         mapper = GazeScreenMapper(screen_w=1920, screen_h=1080, model_path="non_existent_model.pkl")
@@ -71,16 +73,15 @@ class TestMapperFeaturesAndModel(unittest.TestCase):
         mapper.Y_data = Y.tolist()
         mapper.train_model()
 
-        # Gọi recenter bằng feature_vector
         mapper.recenter(feature_vector=X[0].tolist())
-        # Tọa độ target là tâm (960, 540), raw quanh 1920*0.4=768, 1080*0.4=432
         self.assertNotEqual(mapper.offset_x, 0.0)
         self.assertNotEqual(mapper.offset_y, 0.0)
 
         if os.path.exists(test_model_path):
             os.remove(test_model_path)
 
-    def test_micro_dead_zone(self):
+    def test_dead_zone_jitter_stabilization(self):
+        """Kiểm tra Dead-Zone loại bỏ hoàn toàn rung giật vi mô khi mắt nhìn cố định."""
         test_model_path = "test_deadzone_model.pkl"
         if os.path.exists(test_model_path):
             os.remove(test_model_path)
@@ -88,16 +89,18 @@ class TestMapperFeaturesAndModel(unittest.TestCase):
         mapper = GazeScreenMapper(screen_w=1920, screen_h=1080, model_path=test_model_path)
         np.random.seed(42)
         X = np.random.randn(20, 12)
-        Y = np.zeros((20, 2)) + 0.5  # tất cả nhìn vào giữa màn hình
+        Y = np.zeros((20, 2)) + 0.5
         mapper.X_data = X.tolist()
         mapper.Y_data = Y.tolist()
         mapper.train_model()
 
         pt1 = mapper.predict(X[0].tolist(), timestamp=1.0)
-        # Thay đổi cực nhỏ feature vector
-        micro_jitter = X[0] + 1e-6
-        pt2 = mapper.predict(micro_jitter.tolist(), timestamp=1.033)
-        # Do thay đổi cực nhỏ (< DEAD_ZONE_RADIUS), tọa độ phải được giữ nguyên
+        self.assertIsNotNone(pt1)
+
+        # Rung vi mô rất nhỏ (< DEAD_ZONE_RADIUS sau khi qua bộ lọc)
+        jitter_fv = (np.array(X[0]) + 1e-5).tolist()
+        pt2 = mapper.predict(jitter_fv, timestamp=1.033)
+
         self.assertEqual(pt1, pt2)
 
         if os.path.exists(test_model_path):
