@@ -43,13 +43,13 @@ CALIB_TIME_PER_POINT = CALIB_SETTLE_TIME + CALIB_COLLECT_TIME
 
 BLINK_EAR_THRESHOLD = 0.16
 
-# Bộ lọc 1€ Filter (One Euro Filter) hoạt động trên không gian Pixel
-ONE_EURO_MIN_CUTOFF = 0.4  # Tần số cắt tối thiểu (Hz): Giữ con trỏ ổn định khi mắt dừng nhìn
-ONE_EURO_BETA = 0.03       # Hệ số tốc độ: Bám sát tức thì khi mắt liếc nhanh (0ms lag)
+# Bộ lọc 1€ Filter (One Euro Filter)
+ONE_EURO_MIN_CUTOFF = 0.5  # Giữ con trỏ đứng im tuyệt đối khi nhìn cố định
+ONE_EURO_BETA = 0.015      # Bám sát tức thì khi liếc mắt nhanh
 ONE_EURO_D_CUTOFF = 1.0
 
 DEFAULT_ALPHA_SMOOTH = 0.35
 
-# Cấu hình chống rung vi nhãn cầu & bù trôi
-DEAD_ZONE_RADIUS = 8.0          # Vùng chết vi mô (pixel) loại bỏ rung cảm biến mà không gây giật nhảy
+# Cấu hình bù trôi (Re-centering) & Chống rung vi nhãn cầu (Dead-zone)
+DEAD_ZONE_RADIUS = 6.0          # Bán kính vi mô (pixel) để loại bỏ rung nhãn cầu khi nhìn cố định
 RECENTER_SMOOTH_FACTOR = 0.5    # Hệ số làm mượt khi bù trôi
